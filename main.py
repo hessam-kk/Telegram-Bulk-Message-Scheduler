@@ -1,3 +1,5 @@
+import json
+import os
 import queue
 import threading
 import time
@@ -6,6 +8,9 @@ from datetime import datetime, timedelta
 from tkinter import messagebox, ttk
 
 import pyautogui
+
+# Settings are stored next to this script so they load automatically on launch.
+SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
 # --- FAILSAFE ---
 # Moving your mouse to any corner of the screen will instantly stop the script!
@@ -160,6 +165,10 @@ class SchedulerGUI:
                        justify="left", anchor="w", fg="gray")
         tip.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 2))
 
+        # Restore last-used settings (JSON) and keep them saved on close.
+        self._load_settings()
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+
         root.after(100, self.poll_log_queue)
 
     def _build_config_tab(self):
@@ -239,6 +248,69 @@ class SchedulerGUI:
             pass
         self.root.after(100, self.poll_log_queue)
 
+    # --- Persistent JSON settings ---
+    def _load_settings(self):
+        try:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+
+        self.var_total.set(data.get("total", 62))
+        self.var_interval.set(data.get("interval", 3))
+        self.var_year.set(data.get("year", 2026))
+        self.var_month.set(data.get("month", 7))
+        self.var_day.set(data.get("day", 13))
+        self.var_hour.set(data.get("hour", 22))
+        self.var_minute.set(data.get("minute", 15))
+        self.var_mode.set(data.get("mode", "auto"))
+        self.var_countdown.set(data.get("countdown", 1))
+        self.var_use_text.set(data.get("use_text", True))
+        self.var_ox.set(data.get("grid_ox", 771))
+        self.var_oy.set(data.get("grid_oy", 454))
+        self.var_cw.set(data.get("grid_cw", 63))
+        self.var_ch.set(data.get("grid_ch", 50))
+        self.message_text.delete("1.0", "end")
+        self.message_text.insert("1.0", data.get("message", ""))
+
+        geom = data.get("geometry")
+        if geom:
+            try:
+                self.root.geometry(geom)
+            except tk.TclError:
+                pass
+
+    def _save_settings(self):
+        data = {
+            "total": self.var_total.get(),
+            "interval": self.var_interval.get(),
+            "year": self.var_year.get(),
+            "month": self.var_month.get(),
+            "day": self.var_day.get(),
+            "hour": self.var_hour.get(),
+            "minute": self.var_minute.get(),
+            "mode": self.var_mode.get(),
+            "countdown": self.var_countdown.get(),
+            "use_text": self.var_use_text.get(),
+            "message": self.message_text.get("1.0", "end").strip(),
+            "grid_ox": self.var_ox.get(),
+            "grid_oy": self.var_oy.get(),
+            "grid_cw": self.var_cw.get(),
+            "grid_ch": self.var_ch.get(),
+            "geometry": self.root.geometry(),
+        }
+        try:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+        except OSError as exc:
+            self.log(f"Could not save settings: {exc}")
+
+    def on_close(self):
+        self._save_settings()
+        self.root.destroy()
+
     # --- Calibrate-by-click ---
     def start_calibrate(self):
         """Capture the calendar grid by clicking 3 cells instead of typing numbers."""
@@ -302,6 +374,7 @@ class SchedulerGUI:
                 pass
             self._mouse_listener = None
         self.btn_start.configure(state="normal")
+        self._save_settings()
         self.log("Grid calibrated. Ready to Start.")
 
     # --- Start / Stop ---
@@ -350,6 +423,7 @@ class SchedulerGUI:
 
         self.worker = threading.Thread(target=_run, daemon=True)
         self.worker.start()
+        self._save_settings()
 
     def stop(self):
         if self.stop_event.is_set():
