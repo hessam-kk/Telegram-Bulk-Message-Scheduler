@@ -116,7 +116,9 @@ class SchedulerGUI:
         self.ts.configure(".", padding=(2, 1))
 
         root.title("Bulkmail Scheduler")
-        root.resizable(False, False)
+        root.resizable(True, True)
+        # Keep it usable when shrunk, but let it grow for the log/message areas.
+        root.minsize(width=330, height=360)
 
         # --- State variables ---
         self.var_total = tk.IntVar(value=62)
