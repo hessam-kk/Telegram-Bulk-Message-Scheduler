@@ -81,6 +81,7 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
             if months_to_advance > 0:
                 pyautogui.press('down', presses=months_to_advance, interval=0.1)
                 time.sleep(0.3)  # give the UI time to switch months
+                log(f"  advanced calendar {months_to_advance} month(s) to {current_date:%b %Y}")
             elif months_to_advance < 0:
                 log(f"  WARNING: {current_date:%Y-%m-%d} is before today; "
                     "Telegram won't allow scheduling it.")
