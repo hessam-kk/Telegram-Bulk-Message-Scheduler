@@ -133,6 +133,20 @@ class SchedulerGUI:
         self.var_minute = tk.IntVar(value=15)
         self.var_mode = tk.StringVar(value="auto")
         self.var_countdown = tk.IntVar(value=1)
+        self.var_use_text = tk.BooleanVar(value=True)
+
+        # --- Message text box (optional; copied to clipboard on Start) ---
+        msg = ttk.LabelFrame(root, text="Message text (optional)")
+        msg.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self.message_text = tk.Text(msg, height=3, width=72, wrap="word")
+        self.message_text.pack(side="top", fill="both", expand=True, padx=8, pady=(6, 2))
+        ttk.Checkbutton(
+            msg,
+            text="Use the text above as the message (copied to clipboard on Start)",
+            variable=self.var_use_text,
+        ).pack(side="left", padx=8, pady=(0, 6))
+        tk.Label(msg, text="Leave blank to use whatever is already in your clipboard.",
+                 fg="gray").pack(side="right", padx=8, pady=(0, 6))
 
         form = ttk.Frame(root)
         form.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
@@ -159,7 +173,7 @@ class SchedulerGUI:
 
         # --- Calendar calibration + mode ---
         cal = ttk.LabelFrame(root, text="Calendar auto-click (screen pixels)")
-        cal.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        cal.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 8))
 
         self.var_ox = tk.IntVar(value=771)
         self.var_oy = tk.IntVar(value=454)
@@ -195,7 +209,7 @@ class SchedulerGUI:
 
         # --- Buttons ---
         buttons = ttk.Frame(root)
-        buttons.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        buttons.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 8))
         self.btn_start = ttk.Button(buttons, text="Start Scheduling", command=self.start)
         self.btn_start.pack(side="left")
         self.btn_stop = ttk.Button(buttons, text="Stop", command=self.stop, state="disabled")
@@ -203,14 +217,14 @@ class SchedulerGUI:
 
         # --- Log panel ---
         log_frame = ttk.Frame(root)
-        log_frame.grid(row=4, column=0, columnspan=2, sticky="nsew")
+        log_frame.grid(row=5, column=0, columnspan=2, sticky="nsew")
         self.log_text = tk.Text(log_frame, height=14, width=72, state="disabled", wrap="word")
         scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
-        root.grid_rowconfigure(4, weight=1)
+        root.grid_rowconfigure(5, weight=1)
         root.after(100, self.poll_log_queue)
 
     # --- Logging via a thread-safe queue ---
@@ -241,6 +255,19 @@ class SchedulerGUI:
         except ValueError as exc:
             messagebox.showerror("Invalid date/time", str(exc))
             return
+
+        # If a message was typed in the box, push it to the clipboard so the
+        # loop's Ctrl+V pastes it. Leave it empty to reuse the current clipboard.
+        if self.var_use_text.get():
+            text = self.message_text.get("1.0", "end").strip()
+            if text:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(text)
+                self.log("Copied message text to clipboard.")
+            else:
+                self.log("Message box is empty - using current clipboard contents.")
+        else:
+            self.log("Using current clipboard contents as the message.")
 
         auto = (self.var_mode.get() == "auto")
         cal = (self.var_ox.get(), self.var_oy.get(),
