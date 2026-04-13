@@ -12,12 +12,38 @@ import pyautogui
 pyautogui.FAILSAFE = True
 
 
-def schedule_messages(base_time, total_messages, interval_minutes,
-                      manual_day_select, stop_event, log):
+def get_date_cell(target_date, origin_x, origin_y, cell_w, cell_h):
+    """Return the (x, y) pixel coordinates of the center of `target_date`'s cell.
+
+    The calendar must currently be showing `target_date`'s month. The grid is
+    7 columns wide (Sunday first) x 6 rows tall.
+    """
+    # Column of the 1st of the month: Sunday=0, Monday=1, ..., Saturday=6.
+    first_day_col = (target_date.replace(day=1).weekday() + 1) % 7
+
+    # Position of `target_date` within the 42-cell (0-41) grid.
+    cell_index = first_day_col + target_date.day - 1
+    row, col = divmod(cell_index, 7)
+
+    return (
+        origin_x + col * cell_w + cell_w // 2,
+        origin_y + row * cell_h + cell_h // 2,
+    )
+
+
+def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
+                      cal_origin_x, cal_origin_y, cal_cell_w, cal_cell_h,
+                      stop_event, log):
     """Runs the scheduling loop. `log` is a callable(msg) for progress output."""
     log("Starting in 1 second. Switch to Telegram Desktop and do not touch your mouse!")
     log("FAILSAFE IS ON: Slam your mouse into any corner of the screen to panic-stop.")
     time.sleep(1)
+
+    # Telegram's calendar opens on the current month, so this is the anchor for
+    # month navigation and is recomputed against the real "today" each run.
+    today = datetime.now()
+    # The date of the first scheduled message; each next message is a day later.
+    current_date = base_time.replace(hour=0, minute=0, second=0, microsecond=0)
 
     for day in range(1, total_messages + 1):
         if stop_event.is_set():
@@ -35,28 +61,48 @@ def schedule_messages(base_time, total_messages, interval_minutes,
         # Calculate the new time (shifting the clock forward by interval per loop)
         run_time = base_time + timedelta(minutes=interval_minutes * day)
         time_string = run_time.strftime('%H%M')
+        log(f"[{day}/{total_messages}] Scheduling {current_date:%Y-%m-%d} at {time_string}")
 
         # 3. Type the calculated time into the time input box
         pyautogui.press('backspace', presses=4, interval=0.05)  # Clear old time just in case
-        log(f'writing time: {time_string}')
         pyautogui.write(time_string)
+        time.sleep(0.1)
 
-        # 4. --- MANUAL DATE SELECTION ---
-        # Tab to the calendar, then use a crude "skip months" heuristic.
+        # 4. Focus the date picker / calendar.
         pyautogui.press('tab')
-        if day >= 29:
-            pyautogui.press('down')
-        if day >= 57:
-            pyautogui.press('down')
+        time.sleep(0.2)
 
-        if manual_day_select:
+        if auto_click:
+            # 4a. Advance to the correct month. The picker reopens on today's
+            # month for every message, so recompute the offset each loop.
+            months_to_advance = (
+                (current_date.year - today.year) * 12
+                + (current_date.month - today.month)
+            )
+            if months_to_advance > 0:
+                pyautogui.press('down', presses=months_to_advance, interval=0.1)
+                time.sleep(0.3)  # give the UI time to switch months
+            elif months_to_advance < 0:
+                log(f"  WARNING: {current_date:%Y-%m-%d} is before today; "
+                    "Telegram won't allow scheduling it.")
+
+            # 4b. Compute and click the exact date cell.
+            cx, cy = get_date_cell(current_date, cal_origin_x, cal_origin_y,
+                                   cal_cell_w, cal_cell_h)
+            pyautogui.moveTo(cx, cy)
+            time.sleep(0.1)
+            pyautogui.click(button='left')
+            time.sleep(0.2)
+        else:
+            # 4a (manual): User clicks the day by hand.
             log(f"[{day}/{total_messages}] Please manually click the day on the calendar now...")
-            time.sleep(1.0)  # Gives you 1 second to click the correct date.
+            time.sleep(1.0)
 
         # 5. Confirm the schedule
         pyautogui.press('enter')
 
         log(f"Scheduled message with time: {time_string}")
+        current_date += timedelta(days=1)  # advance to the next day
         time.sleep(0.15)  # Brief pause before the next loop starts
 
 
@@ -78,14 +124,14 @@ class SchedulerGUI:
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
 
         # --- Config inputs ---
-        self.var_total = tk.IntVar(value=58)
+        self.var_total = tk.IntVar(value=62)
         self.var_interval = tk.IntVar(value=3)
-        self.var_year = tk.IntVar(value=2025)
-        self.var_month = tk.IntVar(value=10)
-        self.var_day = tk.IntVar(value=15)
-        self.var_hour = tk.IntVar(value=20)
-        self.var_minute = tk.IntVar(value=0)
-        self.var_manual = tk.BooleanVar(value=True)
+        self.var_year = tk.IntVar(value=2026)
+        self.var_month = tk.IntVar(value=7)
+        self.var_day = tk.IntVar(value=13)
+        self.var_hour = tk.IntVar(value=22)
+        self.var_minute = tk.IntVar(value=15)
+        self.var_mode = tk.StringVar(value="auto")
         self.var_countdown = tk.IntVar(value=1)
 
         form = ttk.Frame(root)
@@ -111,16 +157,45 @@ class SchedulerGUI:
         ttk.Label(date, text=":").pack(side="left")
         ttk.Spinbox(date, from_=0, to=59, textvariable=self.var_minute, width=3).pack(side="left")
 
-        ttk.Label(form, text="Countdown (s):").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=2)
+        # --- Calendar calibration + mode ---
+        cal = ttk.LabelFrame(root, text="Calendar auto-click (screen pixels)")
+        cal.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+
+        self.var_ox = tk.IntVar(value=771)
+        self.var_oy = tk.IntVar(value=454)
+        self.var_cw = tk.IntVar(value=63)
+        self.var_ch = tk.IntVar(value=50)
+
+        ttk.Label(cal, text="Origin X:").grid(row=0, column=0, sticky="w", padx=(8, 4), pady=2)
+        ttk.Spinbox(cal, from_=0, to=9999, textvariable=self.var_ox, width=6).grid(
+            row=0, column=1, sticky="w", pady=2)
+        ttk.Label(cal, text="Origin Y:").grid(row=0, column=2, sticky="w", padx=(16, 4), pady=2)
+        ttk.Spinbox(cal, from_=0, to=9999, textvariable=self.var_oy, width=6).grid(
+            row=0, column=3, sticky="w", pady=2)
+        ttk.Label(cal, text="Cell W:").grid(row=0, column=4, sticky="w", padx=(16, 4), pady=2)
+        ttk.Spinbox(cal, from_=1, to=999, textvariable=self.var_cw, width=6).grid(
+            row=0, column=5, sticky="w", pady=2)
+        ttk.Label(cal, text="Cell H:").grid(row=0, column=6, sticky="w", padx=(16, 4), pady=2)
+        ttk.Spinbox(cal, from_=1, to=999, textvariable=self.var_ch, width=6).grid(
+            row=0, column=7, sticky="w", pady=2)
+
+        tk.Label(cal, text="Origin = top-left of the first cell (Sun of week 1).",
+                 fg="gray").grid(row=1, column=0, columnspan=8, sticky="w", padx=8, pady=(0, 2))
+
+        tk.Radiobutton(cal, text="Auto-click date (uses grid above)",
+                       variable=self.var_mode, value="auto").grid(
+            row=2, column=0, columnspan=4, sticky="w", padx=8)
+        tk.Radiobutton(cal, text="Pause & let me click the day",
+                       variable=self.var_mode, value="manual").grid(
+            row=2, column=4, columnspan=4, sticky="w", padx=8)
+
+        ttk.Label(form, text="Countdown (s):").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=2)
         ttk.Spinbox(form, from_=0, to=30, textvariable=self.var_countdown, width=6).grid(
-            row=2, column=1, sticky="w", pady=2)
-        ttk.Checkbutton(form, text="Pause for manual day click",
-                        variable=self.var_manual).grid(row=2, column=2, columnspan=2,
-                                                       sticky="w", padx=(16, 0), pady=2)
+            row=3, column=1, sticky="w", pady=2)
 
         # --- Buttons ---
         buttons = ttk.Frame(root)
-        buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        buttons.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 8))
         self.btn_start = ttk.Button(buttons, text="Start Scheduling", command=self.start)
         self.btn_start.pack(side="left")
         self.btn_stop = ttk.Button(buttons, text="Stop", command=self.stop, state="disabled")
@@ -128,14 +203,14 @@ class SchedulerGUI:
 
         # --- Log panel ---
         log_frame = ttk.Frame(root)
-        log_frame.grid(row=3, column=0, columnspan=2, sticky="nsew")
-        self.log_text = tk.Text(log_frame, height=14, width=64, state="disabled", wrap="word")
+        log_frame.grid(row=4, column=0, columnspan=2, sticky="nsew")
+        self.log_text = tk.Text(log_frame, height=14, width=72, state="disabled", wrap="word")
         scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
-        root.grid_rowconfigure(3, weight=1)
+        root.grid_rowconfigure(4, weight=1)
         root.after(100, self.poll_log_queue)
 
     # --- Logging via a thread-safe queue ---
@@ -167,6 +242,10 @@ class SchedulerGUI:
             messagebox.showerror("Invalid date/time", str(exc))
             return
 
+        auto = (self.var_mode.get() == "auto")
+        cal = (self.var_ox.get(), self.var_oy.get(),
+               self.var_cw.get(), self.var_ch.get())
+
         self.stop_event.clear()
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
@@ -179,8 +258,8 @@ class SchedulerGUI:
 
         def _run():
             time.sleep(countdown)
-            schedule_messages(base_time, total, interval,
-                              self.var_manual.get(), self.stop_event, self.log)
+            schedule_messages(base_time, total, interval, auto, *cal,
+                              self.stop_event, self.log)
             self.log("Finished.")
             self.root.after(0, self.reset_buttons)
 
