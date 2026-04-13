@@ -35,8 +35,7 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
                       cal_origin_x, cal_origin_y, cal_cell_w, cal_cell_h,
                       stop_event, log):
     """Runs the scheduling loop. `log` is a callable(msg) for progress output."""
-    log("Starting in 1 second. Switch to Telegram Desktop and do not touch your mouse!")
-    log("FAILSAFE IS ON: Slam your mouse into any corner of the screen to panic-stop.")
+    log("Starting... Switch to Telegram Desktop. FAILSAFE ON: slam mouse into a corner to stop.")
     time.sleep(1)
 
     # Telegram's calendar opens on the current month, so this is the anchor for
@@ -61,7 +60,7 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
         # Calculate the new time (shifting the clock forward by interval per loop)
         run_time = base_time + timedelta(minutes=interval_minutes * day)
         time_string = run_time.strftime('%H%M')
-        log(f"[{day}/{total_messages}] Scheduling {current_date:%Y-%m-%d} at {time_string}")
+        log(f"[{day}/{total_messages}] {current_date:%Y-%m-%d} {time_string}")
 
         # 3. Type the calculated time into the time input box
         pyautogui.press('backspace', presses=4, interval=0.05)  # Clear old time just in case
@@ -95,13 +94,13 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
             time.sleep(0.2)
         else:
             # 4a (manual): User clicks the day by hand.
-            log(f"[{day}/{total_messages}] Please manually click the day on the calendar now...")
+            log(f"[{day}/{total_messages}] Click the day yourself...")
             time.sleep(1.0)
 
         # 5. Confirm the schedule
         pyautogui.press('enter')
 
-        log(f"Scheduled message with time: {time_string}")
+        log(f"Scheduled {time_string}")
         current_date += timedelta(days=1)  # advance to the next day
         time.sleep(0.15)  # Brief pause before the next loop starts
 
@@ -112,18 +111,14 @@ class SchedulerGUI:
         self.log_queue = log_queue
         self.stop_event = threading.Event()
         self.worker = None
+        self.ts = ttk.Style()
+        # Keep the window slim so it doesn't cover Telegram's calendar.
+        self.ts.configure(".", padding=(2, 1))
 
-        root.title("Telegram Bulk Message Scheduler")
+        root.title("Bulkmail Scheduler")
         root.resizable(False, False)
-        root.configure(padx=16, pady=16)
 
-        # --- Intro ---
-        intro = ("Copy the message to your clipboard, open Telegram Desktop,\n"
-                 "and place your cursor in the message input box before starting.")
-        tk.Label(root, text=intro, justify="left", anchor="w").grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
-
-        # --- Config inputs ---
+        # --- State variables ---
         self.var_total = tk.IntVar(value=62)
         self.var_interval = tk.IntVar(value=3)
         self.var_year = tk.IntVar(value=2026)
@@ -134,98 +129,91 @@ class SchedulerGUI:
         self.var_mode = tk.StringVar(value="auto")
         self.var_countdown = tk.IntVar(value=1)
         self.var_use_text = tk.BooleanVar(value=True)
-
-        # --- Message text box (optional; copied to clipboard on Start) ---
-        msg = ttk.LabelFrame(root, text="Message text (optional)")
-        msg.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-        self.message_text = tk.Text(msg, height=3, width=72, wrap="word")
-        self.message_text.pack(side="top", fill="both", expand=True, padx=8, pady=(6, 2))
-        ttk.Checkbutton(
-            msg,
-            text="Use the text above as the message (copied to clipboard on Start)",
-            variable=self.var_use_text,
-        ).pack(side="left", padx=8, pady=(0, 6))
-        tk.Label(msg, text="Leave blank to use whatever is already in your clipboard.",
-                 fg="gray").pack(side="right", padx=8, pady=(0, 6))
-
-        form = ttk.Frame(root)
-        form.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-
-        ttk.Label(form, text="Total messages:").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=2)
-        ttk.Spinbox(form, from_=1, to=999, textvariable=self.var_total, width=6).grid(
-            row=0, column=1, sticky="w", pady=2)
-        ttk.Label(form, text="Interval (min):").grid(row=0, column=2, sticky="w", padx=(16, 6), pady=2)
-        ttk.Spinbox(form, from_=1, to=720, textvariable=self.var_interval, width=6).grid(
-            row=0, column=3, sticky="w", pady=2)
-
-        ttk.Label(form, text="Start datetime:").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=2)
-        date = ttk.Frame(form)
-        date.grid(row=1, column=1, columnspan=3, sticky="w", pady=2)
-        ttk.Spinbox(date, from_=1, to=31, textvariable=self.var_day, width=3).pack(side="left")
-        ttk.Label(date, text="/").pack(side="left")
-        ttk.Spinbox(date, from_=1, to=12, textvariable=self.var_month, width=3).pack(side="left")
-        ttk.Label(date, text="/").pack(side="left")
-        ttk.Spinbox(date, from_=2020, to=2099, textvariable=self.var_year, width=5).pack(side="left")
-        ttk.Label(date, text="  ").pack(side="left")
-        ttk.Spinbox(date, from_=0, to=23, textvariable=self.var_hour, width=3).pack(side="left")
-        ttk.Label(date, text=":").pack(side="left")
-        ttk.Spinbox(date, from_=0, to=59, textvariable=self.var_minute, width=3).pack(side="left")
-
-        # --- Calendar calibration + mode ---
-        cal = ttk.LabelFrame(root, text="Calendar auto-click (screen pixels)")
-        cal.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-
         self.var_ox = tk.IntVar(value=771)
         self.var_oy = tk.IntVar(value=454)
         self.var_cw = tk.IntVar(value=63)
         self.var_ch = tk.IntVar(value=50)
 
-        ttk.Label(cal, text="Origin X:").grid(row=0, column=0, sticky="w", padx=(8, 4), pady=2)
-        ttk.Spinbox(cal, from_=0, to=9999, textvariable=self.var_ox, width=6).grid(
-            row=0, column=1, sticky="w", pady=2)
-        ttk.Label(cal, text="Origin Y:").grid(row=0, column=2, sticky="w", padx=(16, 4), pady=2)
-        ttk.Spinbox(cal, from_=0, to=9999, textvariable=self.var_oy, width=6).grid(
-            row=0, column=3, sticky="w", pady=2)
-        ttk.Label(cal, text="Cell W:").grid(row=0, column=4, sticky="w", padx=(16, 4), pady=2)
-        ttk.Spinbox(cal, from_=1, to=999, textvariable=self.var_cw, width=6).grid(
-            row=0, column=5, sticky="w", pady=2)
-        ttk.Label(cal, text="Cell H:").grid(row=0, column=6, sticky="w", padx=(16, 4), pady=2)
-        ttk.Spinbox(cal, from_=1, to=999, textvariable=self.var_ch, width=6).grid(
-            row=0, column=7, sticky="w", pady=2)
+        # --- Tabbed layout: small default footprint ---
+        notebook = ttk.Notebook(root)
+        notebook.pack(fill="both", expand=True)
 
-        tk.Label(cal, text="Origin = top-left of the first cell (Sun of week 1).",
-                 fg="gray").grid(row=1, column=0, columnspan=8, sticky="w", padx=8, pady=(0, 2))
+        self.tab_cfg = ttk.Frame(notebook, padding=4)
+        self.tab_log = ttk.Frame(notebook, padding=4)
+        notebook.add(self.tab_cfg, text=" Config ")
+        notebook.add(self.tab_log, text=" Log ")
 
-        tk.Radiobutton(cal, text="Auto-click date (uses grid above)",
-                       variable=self.var_mode, value="auto").grid(
-            row=2, column=0, columnspan=4, sticky="w", padx=8)
-        tk.Radiobutton(cal, text="Pause & let me click the day",
-                       variable=self.var_mode, value="manual").grid(
-            row=2, column=4, columnspan=4, sticky="w", padx=8)
+        self._build_config_tab()
+        self._build_log_tab()
 
-        ttk.Label(form, text="Countdown (s):").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=2)
-        ttk.Spinbox(form, from_=0, to=30, textvariable=self.var_countdown, width=6).grid(
-            row=3, column=1, sticky="w", pady=2)
+        # Helpful nudge on first row of config.
+        tip = tk.Label(self.tab_cfg,
+                       text="Copy this window to a corner first, so it won't cover the calendar.\n"
+                            "Switch focus to Telegram during the countdown.",
+                       justify="left", anchor="w", fg="gray")
+        tip.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 2))
 
-        # --- Buttons ---
-        buttons = ttk.Frame(root)
-        buttons.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-        self.btn_start = ttk.Button(buttons, text="Start Scheduling", command=self.start)
+        root.after(100, self.poll_log_queue)
+
+    def _build_config_tab(self):
+        g = self.tab_cfg
+        g.columnconfigure(1, weight=0)
+        g.columnconfigure(3, weight=1)
+
+        # Row 1: total / interval / countdown
+        ttk.Label(g, text="Msgs:").grid(row=1, column=0, sticky="w")
+        ttk.Spinbox(g, from_=1, to=999, textvariable=self.var_total, width=5).grid(row=1, column=1, sticky="w")
+        ttk.Label(g, text="Every min:").grid(row=1, column=2, sticky="w", padx=(6, 0))
+        ttk.Spinbox(g, from_=1, to=720, textvariable=self.var_interval, width=4).grid(row=1, column=3, sticky="w")
+
+        # Row 2: start datetime
+        ttk.Label(g, text="Start:").grid(row=2, column=0, sticky="w")
+        start = ttk.Frame(g)
+        start.grid(row=2, column=1, columnspan=3, sticky="w")
+        for var, lo, hi, w in [(self.var_day, 1, 31, 3), (self.var_month, 1, 12, 3),
+                               (self.var_year, 2020, 2099, 5), (self.var_hour, 0, 23, 3),
+                               (self.var_minute, 0, 59, 3)]:
+            ttk.Spinbox(start, from_=lo, to=hi, textvariable=var, width=w).pack(side="left")
+
+        # Row 3: mode radios
+        ttk.Radiobutton(g, text="Auto-click", variable=self.var_mode, value="auto").grid(row=3, column=0, columnspan=2, sticky="w")
+        ttk.Radiobutton(g, text="Manual day", variable=self.var_mode, value="manual").grid(row=3, column=2, columnspan=2, sticky="w")
+
+        # Row 4: calibration, single line
+        ttk.Label(g, text="Grid:").grid(row=4, column=0, sticky="w")
+        cal = ttk.Frame(g)
+        cal.grid(row=4, column=1, columnspan=3, sticky="w")
+        for label, var, lo, hi, w in [("O", self.var_ox, 0, 9999, 4), ("Y", self.var_oy, 0, 9999, 4),
+                                      ("W", self.var_cw, 1, 999, 3), ("H", self.var_ch, 1, 999, 3)]:
+            ttk.Label(cal, text=label).pack(side="left")
+            ttk.Spinbox(cal, from_=lo, to=hi, textvariable=var, width=w).pack(side="left", padx=(1, 4))
+
+        ttk.Label(g, text="Countdown s:").grid(row=5, column=0, sticky="w")
+        ttk.Spinbox(g, from_=0, to=30, textvariable=self.var_countdown, width=4).grid(row=5, column=1, columnspan=3, sticky="w")
+
+        # Row 6: message text (compact)
+        msg = ttk.LabelFrame(g, text="Message (optional)")
+        msg.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        self.message_text = tk.Text(msg, height=2, width=58, wrap="word")
+        self.message_text.pack(side="left", fill="both", expand=True, padx=4, pady=2)
+        self.use_msg_chk = ttk.Checkbutton(msg, text="Use above",
+                                           variable=self.var_use_text)
+        self.use_msg_chk.pack(side="left", padx=4)
+
+        # Row 7: buttons
+        btns = ttk.Frame(g)
+        btns.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        self.btn_start = ttk.Button(btns, text="Start Scheduling", command=self.start)
         self.btn_start.pack(side="left")
-        self.btn_stop = ttk.Button(buttons, text="Stop", command=self.stop, state="disabled")
-        self.btn_stop.pack(side="left", padx=(8, 0))
+        self.btn_stop = ttk.Button(btns, text="Stop", command=self.stop, state="disabled")
+        self.btn_stop.pack(side="left", padx=(6, 0))
 
-        # --- Log panel ---
-        log_frame = ttk.Frame(root)
-        log_frame.grid(row=5, column=0, columnspan=2, sticky="nsew")
-        self.log_text = tk.Text(log_frame, height=14, width=72, state="disabled", wrap="word")
-        scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+    def _build_log_tab(self):
+        self.log_text = tk.Text(self.tab_log, height=8, width=58, state="disabled", wrap="word")
+        scroll = ttk.Scrollbar(self.tab_log, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-
-        root.grid_rowconfigure(5, weight=1)
-        root.after(100, self.poll_log_queue)
 
     # --- Logging via a thread-safe queue ---
     def log(self, msg):
@@ -265,7 +253,7 @@ class SchedulerGUI:
                 self.root.clipboard_append(text)
                 self.log("Copied message text to clipboard.")
             else:
-                self.log("Message box is empty - using current clipboard contents.")
+                self.log("Message box empty - using current clipboard contents.")
         else:
             self.log("Using current clipboard contents as the message.")
 
@@ -278,10 +266,7 @@ class SchedulerGUI:
         self.btn_stop.configure(state="normal")
 
         countdown = self.var_countdown.get()
-        if countdown > 0:
-            self.log(f"Starting in {countdown}s. Switch to Telegram Desktop now!")
-        else:
-            self.log("Starting now. Switch to Telegram Desktop!")
+        self.log(f"Starting in {countdown}s. Switch to Telegram Desktop now!")
 
         def _run():
             time.sleep(countdown)
