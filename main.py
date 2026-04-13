@@ -136,6 +136,10 @@ class SchedulerGUI:
         self.var_cw = tk.IntVar(value=63)
         self.var_ch = tk.IntVar(value=50)
 
+        # Calibration-by-click state (pynput listener).
+        self.calib_clicks = None
+        self._mouse_listener = None
+
         # --- Tabbed layout: small default footprint ---
         notebook = ttk.Notebook(root)
         notebook.pack(fill="both", expand=True)
@@ -189,6 +193,7 @@ class SchedulerGUI:
                                       ("W", self.var_cw, 1, 999, 3), ("H", self.var_ch, 1, 999, 3)]:
             ttk.Label(cal, text=label).pack(side="left")
             ttk.Spinbox(cal, from_=lo, to=hi, textvariable=var, width=w).pack(side="left", padx=(1, 4))
+        ttk.Button(cal, text="by Click", command=self.start_calibrate).pack(side="left", padx=(6, 0))
 
         ttk.Label(g, text="Countdown s:").grid(row=5, column=0, sticky="w")
         ttk.Spinbox(g, from_=0, to=30, textvariable=self.var_countdown, width=4).grid(row=5, column=1, columnspan=3, sticky="w")
@@ -232,6 +237,71 @@ class SchedulerGUI:
         except queue.Empty:
             pass
         self.root.after(100, self.poll_log_queue)
+
+    # --- Calibrate-by-click ---
+    def start_calibrate(self):
+        """Capture the calendar grid by clicking 3 cells instead of typing numbers."""
+        if self.worker and self.worker.is_alive():
+            self.log("Scheduling is running - stop it before calibrating.")
+            return
+        try:
+            from pynput import mouse
+        except ImportError:
+            messagebox.showinfo("Missing dependency",
+                                "pip install pynput  (needed for click-to-calibrate)")
+            return
+
+        self.calib_clicks = []
+        self.btn_start.configure(state="disabled")
+        self.log("CALIBRATE: click the TOP-LEFT calendar cell (Sun, week 1).")
+        self.log("Then the cell to its RIGHT, then the cell BELOW it. 3 clicks total.")
+        self._mouse_listener = mouse.Listener(
+            on_click=self._on_click,
+            on_move=None,
+            on_scroll=None,
+        )
+        self._mouse_listener.start()
+
+    def _on_click(self, x, y, button, pressed):
+        if pressed:
+            self.calib_clicks.append((x, y))
+            self.root.after(0, self._apply_calib_click)
+        return False  # keep listening until stopped
+
+    def _apply_calib_click(self):
+        n = len(self.calib_clicks)
+        if n == 1:
+            x, y = self.calib_clicks[0]
+            self.var_ox.set(x)
+            self.var_oy.set(y)
+            self.log("  Click 1 -> origin set. Now click the cell to its RIGHT (same row).")
+        elif n == 2:
+            w = abs(self.calib_clicks[1][0] - self.calib_clicks[0][0])
+            if w == 0:
+                self.calib_clicks.pop()
+                self.log("  Same X as first - click a DIFFERENT cell to the right.")
+                return
+            self.var_cw.set(w)
+            self.log(f"  Click 2 -> cell width {w}. Now click the cell BELOW (same column).")
+        elif n == 3:
+            h = abs(self.calib_clicks[2][1] - self.calib_clicks[0][1])
+            if h == 0:
+                self.calib_clicks.pop()
+                self.log("  Same Y as first - click a DIFFERENT cell below.")
+                return
+            self.var_ch.set(h)
+            self.log(f"  Click 3 -> cell height {h}. Calibration complete.")
+            self._stop_calibrate()
+
+    def _stop_calibrate(self):
+        if self._mouse_listener is not None:
+            try:
+                self._mouse_listener.stop()
+            except Exception:
+                pass
+            self._mouse_listener = None
+        self.btn_start.configure(state="normal")
+        self.log("Grid calibrated. Ready to Start.")
 
     # --- Start / Stop ---
     def start(self):
