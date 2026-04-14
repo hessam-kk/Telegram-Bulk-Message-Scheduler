@@ -159,6 +159,7 @@ class SchedulerGUI:
         # Calibration-by-click state (pynput listener).
         self.calib_clicks = None
         self._mouse_listener = None
+        self._calibration_overlay = None
 
         # --- Tabbed layout: small default footprint ---
         notebook = ttk.Notebook(root)
@@ -340,6 +341,7 @@ class SchedulerGUI:
             return
 
         self.calib_clicks = []
+        self._create_calibration_overlay()
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="disabled")
         self.log("CALIBRATE: click the TOP-LEFT calendar cell (Sun, week 1).")
@@ -350,6 +352,35 @@ class SchedulerGUI:
             on_scroll=None,
         )
         self._mouse_listener.start()
+
+    def _create_calibration_overlay(self):
+        """Create a transparent, always-on-top overlay showing calibration points."""
+        overlay = tk.Toplevel(self.root)
+        overlay.title("Calibration guide")
+        overlay.overrideredirect(True)
+        overlay.attributes("-topmost", True)
+        overlay.attributes("-alpha", 0.88)
+        overlay.geometry("320x86+20+20")
+        frame = tk.Frame(overlay, bg="#202124", padx=8, pady=6)
+        frame.pack(fill="both", expand=True)
+        self.calibration_label = tk.Label(
+            frame, text="Calibration started", fg="white", bg="#202124",
+            justify="left", anchor="w", font=("Segoe UI", 10),
+        )
+        self.calibration_label.pack(fill="both", expand=True)
+        self._calibration_overlay = overlay
+
+    def _update_calibration_overlay(self, text):
+        overlay = self._calibration_overlay
+        if overlay is not None and overlay.winfo_exists():
+            self.calibration_label.configure(text=text)
+            overlay.update_idletasks()
+
+    def _close_calibration_overlay(self):
+        overlay = self._calibration_overlay
+        self._calibration_overlay = None
+        if overlay is not None and overlay.winfo_exists():
+            overlay.destroy()
 
     def _on_click(self, x, y, button, pressed):
         if pressed:
@@ -363,28 +394,42 @@ class SchedulerGUI:
             x, y = self.calib_clicks[0]
             self.var_ox.set(x)
             self.var_oy.set(y)
+            self._update_calibration_overlay(
+                f"Captured 1/3: origin ({x}, {y})\\n"
+                "Next: click the cell directly RIGHT of it."
+            )
             self.log("  Click 1 -> origin set. Now click the cell to its RIGHT (same row).")
         elif n == 2:
             w = abs(self.calib_clicks[1][0] - self.calib_clicks[0][0])
             if w == 0:
                 self.calib_clicks.pop()
+                self._update_calibration_overlay("Same X detected.\\nClick a different cell to the RIGHT.")
                 self.log("  Same X as first - click a DIFFERENT cell to the right.")
                 return
             self.var_cw.set(w)
+            self._update_calibration_overlay(
+                f"Captured 2/3: cell width {w}px\\n"
+                "Next: click the cell directly BELOW origin."
+            )
             self.log(f"  Click 2 -> cell width {w}. Now click the cell BELOW (same column).")
         elif n == 3:
             h = abs(self.calib_clicks[2][1] - self.calib_clicks[0][1])
             if h == 0:
                 self.calib_clicks.pop()
+                self._update_calibration_overlay("Same Y detected.\\nClick a different cell BELOW.")
                 self.log("  Same Y as first - click a DIFFERENT cell below.")
                 return
             self.var_ch.set(h)
+            self._update_calibration_overlay(
+                f"Captured 3/3: cell height {h}px\\nCalibration complete."
+            )
             self.log(f"  Click 3 -> cell height {h}. Calibration complete.")
             self._stop_calibrate()
 
     def _stop_calibrate(self):
         listener = self._mouse_listener
         self._mouse_listener = None
+        self._close_calibration_overlay()
         if listener is not None:
             try:
                 listener.stop()
