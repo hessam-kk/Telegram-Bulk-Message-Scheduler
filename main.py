@@ -12,6 +12,19 @@ import pyautogui
 # Settings are stored next to this script so they load automatically on launch.
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
+# --- UI palette (dark, Telegram-inspired) ---
+BG = "#1f2023"      # window background
+CARD = "#26282c"    # section cards
+FIELD = "#2f3237"   # input fields / troughs
+FG = "#e6e6e6"      # primary text
+MUTED = "#9aa0a6"   # secondary text
+BORDER = "#3a3d42"  # card & field borders
+ACCENT = "#8ab4f8"  # section titles
+GREEN = "#2e9e4f"   # Start button
+RED = "#d93a3a"     # Stop button
+LOG_BG = "#141518"
+LOG_FG = "#c7cbd1"
+
 # --- FAILSAFE ---
 # Moving your mouse to any corner of the screen will instantly stop the script!
 pyautogui.FAILSAFE = True
@@ -142,14 +155,12 @@ class SchedulerGUI:
         self.log_queue = log_queue
         self.stop_event = threading.Event()
         self.worker = None
-        self.ts = ttk.Style()
-        # Keep the window slim so it doesn't cover Telegram's calendar.
-        self.ts.configure(".", padding=(2, 1))
+        self._setup_theme()
 
         root.title("Bulkmail Scheduler")
+        root.configure(bg=BG)
         root.resizable(True, True)
-        # Keep it usable when shrunk, but let it grow for the log/message areas.
-        root.minsize(width=330, height=360)
+        root.minsize(width=380, height=440)
 
         # --- State variables ---
         self.var_total = tk.IntVar(value=62)
@@ -175,24 +186,17 @@ class SchedulerGUI:
         self._calibration_overlay = None
         self._click_marker = None
 
-        # --- Tabbed layout: small default footprint ---
-        notebook = ttk.Notebook(root)
-        notebook.pack(fill="both", expand=True)
+        tip = tk.Label(root,
+                       text="ⓘ  Keep this window clear of the calendar  ·  F9 = emergency stop",
+                       bg=BG, fg=MUTED, font=("Segoe UI", 8))
+        tip.pack(fill="x", padx=10, pady=(6, 2))
 
-        self.tab_cfg = ttk.Frame(notebook, padding=4)
-        self.tab_log = ttk.Frame(notebook, padding=4)
-        notebook.add(self.tab_cfg, text=" Config ")
-        notebook.add(self.tab_log, text=" Log ")
-
-        self._build_config_tab()
-        self._build_log_tab()
-
-        # Helpful nudge on first row of config.
-        tip = tk.Label(self.tab_cfg,
-                       text="Copy this window to a corner first, so it won't cover the calendar.\n"
-                            "Switch focus to Telegram during the countdown.  Press F9 to STOP anytime.",
-                       justify="left", anchor="w", fg="gray")
-        tip.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 2))
+        # One page, five sections: everything visible without tab switching.
+        self._build_schedule_card()
+        self._build_automation_card()
+        self._build_message_card()
+        self._build_log_area()
+        self._build_action_bar()
 
         # Restore last-used settings (JSON) and keep them saved on close.
         self._load_settings()
@@ -200,74 +204,215 @@ class SchedulerGUI:
         self._start_stop_hotkey()
 
         root.after(100, self.poll_log_queue)
+        self._update_preview()
 
-    def _build_config_tab(self):
-        g = self.tab_cfg
-        g.columnconfigure(1, weight=0)
-        g.columnconfigure(3, weight=1)
+    # --- Theme ---
+    def _setup_theme(self):
+        """Dark, Telegram-inspired look built on the stylable 'clam' theme."""
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(".", background=CARD, foreground=FG, font=("Segoe UI", 9))
+        style.configure("TFrame", background=CARD)
+        style.configure("Card.TLabelframe", background=CARD, bordercolor=BORDER,
+                        lightcolor=BORDER, darkcolor=BORDER, borderwidth=1)
+        style.configure("Card.TLabelframe.Label", background=CARD,
+                        foreground=ACCENT, font=("Segoe UI", 9, "bold"))
+        style.configure("TLabel", background=CARD, foreground=FG)
+        style.configure("Outer.TLabel", background=BG, foreground=MUTED)
+        style.configure("Preview.TLabel", background=CARD, foreground=MUTED,
+                        font=("Segoe UI", 8))
+        style.configure("TSpinbox", fieldbackground=FIELD, background=FIELD,
+                        foreground=FG, arrowcolor=FG, insertcolor=FG,
+                        bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
+        style.map("TSpinbox", fieldbackground=[("readonly", FIELD)],
+                  foreground=[("disabled", MUTED)])
+        style.configure("TButton", background=FIELD, foreground=FG,
+                        bordercolor=BORDER, lightcolor=FIELD, darkcolor=FIELD)
+        style.map("TButton",
+                  background=[("active", "#43474e"), ("disabled", FIELD)],
+                  foreground=[("disabled", MUTED)])
+        style.configure("green.Horizontal.TProgressbar", troughcolor=FIELD,
+                        background=GREEN, bordercolor=CARD,
+                        lightcolor=GREEN, darkcolor=GREEN)
 
-        # Row 1: total / interval / countdown
-        ttk.Label(g, text="Msgs:").grid(row=1, column=0, sticky="w")
-        ttk.Spinbox(g, from_=1, to=999, textvariable=self.var_total, width=5).grid(row=1, column=1, sticky="w")
-        ttk.Label(g, text="Every min:").grid(row=1, column=2, sticky="w", padx=(6, 0))
-        ttk.Spinbox(g, from_=1, to=720, textvariable=self.var_interval, width=4).grid(row=1, column=3, sticky="w")
-        ttk.Label(g, text="Typing s:").grid(row=2, column=0, sticky="w")
-        ttk.Spinbox(g, from_=0.01, to=2, increment=0.01, format="%0.2f", textvariable=self.var_typing_interval, width=5).grid(row=2, column=1, sticky="w")
+    def _spin(self, parent, var, lo, hi, width, increment=None, fmt=None):
+        kw = {"from_": lo, "to": hi, "textvariable": var, "width": width}
+        if increment is not None:
+            kw["increment"] = increment
+        if fmt:
+            kw["format"] = fmt
+        return ttk.Spinbox(parent, **kw)
 
-        # Row 2: start datetime
-        ttk.Label(g, text="Start:").grid(row=3, column=0, sticky="w")
-        start = ttk.Frame(g)
-        start.grid(row=3, column=1, columnspan=3, sticky="w")
-        for var, lo, hi, w in [(self.var_day, 1, 31, 3), (self.var_month, 1, 12, 3),
-                               (self.var_year, 2020, 2099, 5), (self.var_hour, 0, 23, 3),
-                               (self.var_minute, 0, 59, 3)]:
-            ttk.Spinbox(start, from_=lo, to=hi, textvariable=var, width=w).pack(side="left")
+    def _check_kwargs(self):
+        """Consistent dark look for classic radio/check buttons."""
+        return dict(bg=CARD, fg=FG, activebackground=CARD, activeforeground=FG,
+                    selectcolor=FIELD, highlightthickness=0, bd=0,
+                    cursor="hand2", font=("Segoe UI", 9))
 
-        # Row 3: mode radios
-        ttk.Radiobutton(g, text="Auto-click", variable=self.var_mode, value="auto").grid(row=4, column=0, columnspan=2, sticky="w")
-        ttk.Radiobutton(g, text="Manual day", variable=self.var_mode, value="manual").grid(row=4, column=2, columnspan=2, sticky="w")
+    # --- Section builders ---
+    def _build_schedule_card(self):
+        card = ttk.Labelframe(self.root, text="  Schedule ",
+                              style="Card.TLabelframe", padding=8)
+        card.pack(fill="x", padx=8, pady=(2, 4))
 
-        # Row 4: calibration, single line
-        ttk.Label(g, text="Grid:").grid(row=5, column=0, sticky="w")
-        cal = ttk.Frame(g)
-        cal.grid(row=5, column=1, columnspan=3, sticky="w")
-        for label, var, lo, hi, w in [("O", self.var_ox, 0, 9999, 4), ("Y", self.var_oy, 0, 9999, 4),
-                                      ("W", self.var_cw, 1, 999, 3), ("H", self.var_ch, 1, 999, 3)]:
-            ttk.Label(cal, text=label).pack(side="left")
-            ttk.Spinbox(cal, from_=lo, to=hi, textvariable=var, width=w).pack(side="left", padx=(1, 4))
-        ttk.Button(cal, text="by Click", command=self.start_calibrate).pack(side="left", padx=(6, 0))
+        row1 = tk.Frame(card, bg=CARD)
+        row1.pack(fill="x")
+        ttk.Label(row1, text="Start").pack(side="left", padx=(0, 6))
+        self._spin(row1, self.var_day, 1, 31, 3).pack(side="left", padx=1)
+        ttk.Label(row1, text="·", foreground=MUTED).pack(side="left", padx=1)
+        self._spin(row1, self.var_month, 1, 12, 3).pack(side="left", padx=1)
+        ttk.Label(row1, text="·", foreground=MUTED).pack(side="left", padx=1)
+        self._spin(row1, self.var_year, 2020, 2099, 5).pack(side="left", padx=1)
+        ttk.Label(row1, text="at", foreground=MUTED).pack(side="left", padx=(8, 4))
+        self._spin(row1, self.var_hour, 0, 23, 3).pack(side="left", padx=1)
+        ttk.Label(row1, text=":", foreground=MUTED).pack(side="left", padx=1)
+        self._spin(row1, self.var_minute, 0, 59, 3).pack(side="left", padx=1)
 
-        ttk.Label(g, text="Countdown s:").grid(row=6, column=0, sticky="w")
-        ttk.Spinbox(g, from_=0, to=30, increment=0.5, format="%0.1f", textvariable=self.var_countdown, width=4).grid(row=6, column=1, columnspan=3, sticky="w")
+        row2 = tk.Frame(card, bg=CARD)
+        row2.pack(fill="x", pady=(4, 0))
+        ttk.Label(row2, text="Messages").pack(side="left", padx=(0, 6))
+        self._spin(row2, self.var_total, 1, 999, 5).pack(side="left", padx=1)
+        ttk.Label(row2, text="every", foreground=MUTED).pack(side="left", padx=(10, 4))
+        self._spin(row2, self.var_interval, 1, 720, 4).pack(side="left", padx=1)
+        ttk.Label(row2, text="min", foreground=MUTED).pack(side="left", padx=2)
 
-        # Row 6: live scheduling counter
-        self.var_scheduled = tk.IntVar(value=0)
-        self.scheduled_label = ttk.Label(g, text="Scheduled: 0 / 0")
-        self.scheduled_label.grid(row=7, column=0, columnspan=4, sticky="w", pady=(3, 0))
+        # Live first/last preview so the whole plan is visible before starting.
+        self.preview_label = ttk.Label(card, text="", style="Preview.TLabel")
+        self.preview_label.pack(fill="x", pady=(6, 0))
+        for var in (self.var_total, self.var_interval, self.var_day,
+                    self.var_month, self.var_year, self.var_hour,
+                    self.var_minute):
+            var.trace_add("write", self._update_preview)
 
-        # Row 7: message text (compact)
-        msg = ttk.LabelFrame(g, text="Message (optional)")
-        msg.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(4, 0))
-        self.message_text = tk.Text(msg, height=2, width=58, wrap="word")
-        self.message_text.pack(side="left", fill="both", expand=True, padx=4, pady=2)
-        self.use_msg_chk = ttk.Checkbutton(msg, text="Use above",
-                                           variable=self.var_use_text)
-        self.use_msg_chk.pack(side="left", padx=4)
+    def _build_automation_card(self):
+        card = ttk.Labelframe(self.root, text="  Automation ",
+                              style="Card.TLabelframe", padding=8)
+        card.pack(fill="x", padx=8, pady=(0, 4))
 
-        # Row 7: buttons
-        btns = ttk.Frame(g)
-        btns.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(4, 0))
-        self.btn_start = ttk.Button(btns, text="Start Scheduling", command=self.start)
-        self.btn_start.pack(side="left")
-        self.btn_stop = ttk.Button(btns, text="Stop", command=self.stop, state="disabled")
-        self.btn_stop.pack(side="left", padx=(6, 0))
+        row = tk.Frame(card, bg=CARD)
+        row.pack(fill="x")
+        tk.Radiobutton(row, text="Auto-click calendar", variable=self.var_mode,
+                       value="auto", **self._check_kwargs()).pack(side="left")
+        tk.Radiobutton(row, text="Manual day", variable=self.var_mode,
+                       value="manual", **self._check_kwargs()).pack(side="left", padx=(14, 0))
 
-    def _build_log_tab(self):
-        self.log_text = tk.Text(self.tab_log, height=8, width=58, state="disabled", wrap="word")
-        scroll = ttk.Scrollbar(self.tab_log, command=self.log_text.yview)
+        row2 = tk.Frame(card, bg=CARD)
+        row2.pack(fill="x", pady=(4, 0))
+        ttk.Label(row2, text="Start delay").pack(side="left", padx=(0, 4))
+        self._spin(row2, self.var_countdown, 0, 30, 4, increment=0.5,
+                   fmt="%0.1f").pack(side="left", padx=1)
+        ttk.Label(row2, text="s", foreground=MUTED).pack(side="left", padx=2)
+        ttk.Label(row2, text="Typing speed").pack(side="left", padx=(16, 4))
+        self._spin(row2, self.var_typing_interval, 0.01, 2, 5, increment=0.01,
+                   fmt="%0.2f").pack(side="left", padx=1)
+        ttk.Label(row2, text="s/char", foreground=MUTED).pack(side="left", padx=2)
+
+        row3 = tk.Frame(card, bg=CARD)
+        row3.pack(fill="x", pady=(4, 0))
+        ttk.Label(row3, text="Grid").pack(side="left", padx=(0, 4))
+        for label, var, lo, hi, w in [("O", self.var_ox, 0, 9999, 4),
+                                      ("Y", self.var_oy, 0, 9999, 4),
+                                      ("W", self.var_cw, 1, 999, 3),
+                                      ("H", self.var_ch, 1, 999, 3)]:
+            ttk.Label(row3, text=label, foreground=MUTED).pack(side="left", padx=(4, 1))
+            self._spin(row3, var, lo, hi, w).pack(side="left", padx=1)
+        ttk.Button(row3, text="Calibrate by click…",
+                   command=self.start_calibrate).pack(side="left", padx=(10, 0))
+
+    def _build_message_card(self):
+        card = ttk.Labelframe(self.root, text="  Message ",
+                              style="Card.TLabelframe", padding=8)
+        card.pack(fill="x", padx=8, pady=(0, 4))
+        hdr = tk.Frame(card, bg=CARD)
+        hdr.pack(fill="x")
+        ttk.Label(hdr, text="Optional - pasted before each schedule command",
+                  foreground=MUTED).pack(side="left")
+        self.use_msg_chk = tk.Checkbutton(hdr, text="Use this message",
+                                          variable=self.var_use_text,
+                                          **self._check_kwargs())
+        self.use_msg_chk.pack(side="right")
+        self.message_text = tk.Text(card, height=2, wrap="word", bd=0,
+                                    highlightthickness=0, bg=FIELD, fg=FG,
+                                    insertbackground=FG, font=("Segoe UI", 9))
+        self.message_text.pack(fill="both", expand=True, pady=(4, 0))
+
+    def _build_log_area(self):
+        card = ttk.Labelframe(self.root, text="  Log ",
+                              style="Card.TLabelframe", padding=8)
+        card.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        self.log_text = tk.Text(card, height=4, wrap="word", bd=0,
+                                highlightthickness=0, bg=LOG_BG, fg=LOG_FG,
+                                insertbackground=FG, font=("Consolas", 8),
+                                state="disabled")
+        scroll = tk.Scrollbar(card, command=self.log_text.yview,
+                              troughcolor=FIELD, bg=CARD,
+                              activebackground=BORDER, bd=0, width=10)
         self.log_text.configure(yscrollcommand=scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+
+    def _build_action_bar(self):
+        bar = tk.Frame(self.root, bg=BG)
+        bar.pack(fill="x", padx=8, pady=(0, 2))
+        self.btn_start = tk.Button(bar, text="▶  Start Scheduling",
+                                   command=self.start, bg=GREEN, fg="white",
+                                   activebackground="#258742",
+                                   activeforeground="white", relief="flat",
+                                   bd=0, padx=14, pady=4, cursor="hand2",
+                                   disabledforeground="#6f8b76",
+                                   font=("Segoe UI", 10, "bold"))
+        self.btn_start.pack(side="left")
+        self.btn_stop = tk.Button(bar, text="■  Stop", command=self.stop,
+                                  state="disabled", bg=RED, fg="white",
+                                  activebackground="#b32c2c",
+                                  activeforeground="white", relief="flat",
+                                  bd=0, padx=12, pady=4, cursor="hand2",
+                                  disabledforeground="#8b6f6f",
+                                  font=("Segoe UI", 10, "bold"))
+        self.btn_stop.pack(side="left", padx=(8, 14))
+        self.progress = ttk.Progressbar(bar, style="green.Horizontal.TProgressbar",
+                                        maximum=1, value=0)
+        self.progress.pack(side="left", fill="x", expand=True)
+
+        foot = tk.Frame(self.root, bg=BG)
+        foot.pack(fill="x", padx=8, pady=(0, 8))
+        self.var_scheduled = tk.IntVar(value=0)
+        self.scheduled_label = ttk.Label(foot, text="Scheduled: 0 / 0",
+                                         style="Outer.TLabel")
+        self.scheduled_label.pack(side="left")
+        self.status_label = ttk.Label(foot, text="", style="Outer.TLabel",
+                                      anchor="e")
+        self.status_label.pack(side="right", fill="x", expand=True)
+
+    # --- Live schedule preview ---
+    def _update_preview(self, *_):
+        """Show first/last message times computed from the GUI inputs."""
+        try:
+            start = datetime(self.var_year.get(), self.var_month.get(),
+                             self.var_day.get(), self.var_hour.get(),
+                             self.var_minute.get())
+            total = self.var_total.get()
+            interval = self.var_interval.get()
+        except (ValueError, tk.TclError):
+            self.preview_label.configure(text="⚠  Invalid start date/time",
+                                         foreground="#ff6b6b")
+            return
+        # Matches schedule_messages exactly: the calendar advances one day per
+        # message while the clock advances by the interval (wrapping at
+        # midnight).
+        last = start + timedelta(days=max(total - 1, 0))
+        last_clock = start + timedelta(minutes=interval * max(total - 1, 0))
+        last = last.replace(hour=last_clock.hour, minute=last_clock.minute)
+        text = (f"First {start:%b %d, %H:%M}   →   Last {last:%b %d, %H:%M}"
+                f"   ({total} × {interval} min)")
+        if start < datetime.now():
+            text = f"⚠  Start is in the past - Telegram will reject it  ·  {text}"
+            self.preview_label.configure(text=text, foreground="#f2a33c")
+        else:
+            self.preview_label.configure(text=text, foreground=MUTED)
 
     # --- Logging via a thread-safe queue ---
     def log(self, msg):
@@ -281,9 +426,24 @@ class SchedulerGUI:
                 self.log_text.insert("end", f"{msg}\n")
                 self.log_text.see("end")
                 self.log_text.configure(state="disabled")
+                self._set_status(msg)
         except queue.Empty:
             pass
         self.root.after(100, self.poll_log_queue)
+
+    def _set_status(self, msg):
+        """Mirror the latest log line next to the counter, colored by kind."""
+        fg = MUTED
+        if "ERROR" in msg:
+            fg = "#ff6b6b"
+        elif "WARNING" in msg:
+            fg = "#f2a33c"
+        elif msg.startswith("Scheduled ") or msg == "Finished.":
+            fg = "#4fd07a"
+        try:
+            self.status_label.configure(text=msg[-90:], fg=fg)
+        except tk.TclError:
+            pass
 
     # --- Persistent JSON settings ---
     def _load_settings(self):
@@ -476,6 +636,10 @@ class SchedulerGUI:
     def _set_scheduled_counter(self, scheduled, total):
         self.var_scheduled.set(scheduled)
         self.scheduled_label.configure(text=f"Scheduled: {scheduled} / {total}")
+        try:
+            self.progress.configure(maximum=max(total, 1), value=scheduled)
+        except tk.TclError:
+            pass
 
     def _show_click_marker(self, x, y):
         """Show a short-lived red dot at the exact automated click location."""
@@ -543,6 +707,10 @@ class SchedulerGUI:
         self.stop_event.clear()
         self.var_scheduled.set(0)
         self.scheduled_label.configure(text=f"Scheduled: 0 / {self.var_total.get()}")
+        try:
+            self.progress.configure(maximum=max(total, 1), value=0)
+        except tk.TclError:
+            pass
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
 
