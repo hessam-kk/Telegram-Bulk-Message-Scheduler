@@ -81,7 +81,9 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
         nap(0.3)
 
         # Calculate the new time (shifting the clock forward by interval per loop)
-        run_time = base_time + timedelta(minutes=interval_minutes * day)
+        # `day` is 1-based, but the first message must use the selected
+        # start time. Each later message is exactly `interval_minutes` later.
+        run_time = base_time + timedelta(minutes=interval_minutes * (day - 1))
         time_string = run_time.strftime('%H%M')
         log(f"[{day}/{total_messages}] {current_date:%Y-%m-%d} {time_string}")
 
