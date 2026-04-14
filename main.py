@@ -18,22 +18,27 @@ pyautogui.FAILSAFE = True
 
 
 def get_date_cell(target_date, origin_x, origin_y, cell_w, cell_h):
-    """Return the (x, y) pixel coordinates of the center of `target_date`'s cell.
+    """Return the center of a date cell in a Sunday-first calendar grid.
 
-    The calendar must currently be showing `target_date`'s month. The grid is
-    7 columns wide (Sunday first) x 6 rows tall.
+    ``origin_x``/``origin_y`` are the center of the first visible cell (the
+    top-left cell), not its corner. This is important because clicking a cell's
+    center is more reliable than clicking near its edges or adjacent cells.
+    The calendar must currently show ``target_date``'s month.
     """
-    # Column of the 1st of the month: Sunday=0, Monday=1, ..., Saturday=6.
+    # Python weekday(): Monday=0; convert to Sunday=0.
     first_day_col = (target_date.replace(day=1).weekday() + 1) % 7
-
-    # Position of `target_date` within the 42-cell (0-41) grid.
     cell_index = first_day_col + target_date.day - 1
     row, col = divmod(cell_index, 7)
 
     return (
-        origin_x + col * cell_w + cell_w // 2,
-        origin_y + row * cell_h + cell_h // 2,
+        round(origin_x + col * cell_w),
+        round(origin_y + row * cell_h),
     )
+
+
+def months_between(start, end):
+    """Return the signed number of calendar-month transitions from start to end."""
+    return (end.year - start.year) * 12 + end.month - start.month
 
 class _SchedulingStop(Exception):
     """Raised to abort a run the instant the user asks to stop."""
@@ -42,7 +47,7 @@ class _SchedulingStop(Exception):
 
 def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
                       cal_origin_x, cal_origin_y, cal_cell_w, cal_cell_h,
-                      stop_event, log):
+                      stop_event, log, show_click):
     """Runs the scheduling loop. `log` is a callable(msg) for progress output."""
     log("Starting... Press F9 (or slam mouse to a corner) to stop.")
 
@@ -58,10 +63,10 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
     nap(1.0)
 
     # Telegram's calendar opens on the current month, so this is the anchor for
-    # month navigation and is recomputed against the real "today" each run.
-    today = datetime.now()
+    # month navigation and is recomputed against the real "today" each run.    today = datetime.now()
     # The date of the first scheduled message; each next message is a day later.
     current_date = base_time.replace(hour=0, minute=0, second=0, microsecond=0)
+
 
     for day in range(1, total_messages + 1):
         if stop_event.is_set():
@@ -90,15 +95,13 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
         nap(0.2)
 
         if auto_click:
-            # 4a. Advance to the correct month. The picker reopens on today's
-            # month for every message, so recompute the offset each loop.
-            months_to_advance = (
-                (current_date.year - today.year) * 12
-                + (current_date.month - today.month)
-            )
+            # 4a. Advance to the correct month. Telegram's month control is
+            # focused after the Tab above; Down changes the month one step at a
+            # time (the chevron itself is not a date-cell click target).
+            months_to_advance = months_between(datetime.now(), current_date)
             if months_to_advance > 0:
-                pyautogui.press('down', presses=months_to_advance, interval=0.1)
-                nap(0.3)  # give the UI time to switch months
+                pyautogui.press('down', presses=months_to_advance, interval=0.15)
+                nap(0.5)  # let the calendar redraw before locating the cell
                 log(f"  advanced calendar {months_to_advance} month(s) to {current_date:%b %Y}")
             elif months_to_advance < 0:
                 log(f"  WARNING: {current_date:%Y-%m-%d} is before today; "
@@ -107,9 +110,13 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
             # 4b. Compute and click the exact date cell.
             cx, cy = get_date_cell(current_date, cal_origin_x, cal_origin_y,
                                    cal_cell_w, cal_cell_h)
-            pyautogui.moveTo(cx, cy)
-            nap(0.1)
-            pyautogui.click(button='left')
+            log(f"  clicking {current_date:%b %d} at cell center ({cx}, {cy})")
+            pyautogui.moveTo(cx, cy, duration=0.15)
+            # Click first; the marker is drawn afterward so it cannot cover the
+            # calendar and receive the click.
+            pyautogui.click(cx, cy, button='left')
+            show_click(cx, cy)
+            nap(0.15)
             nap(0.2)
         else:
             # 4a (manual): User clicks the day by hand.
@@ -160,6 +167,7 @@ class SchedulerGUI:
         self.calib_clicks = None
         self._mouse_listener = None
         self._calibration_overlay = None
+        self._click_marker = None
 
         # --- Tabbed layout: small default footprint ---
         notebook = ttk.Notebook(root)
@@ -324,6 +332,8 @@ class SchedulerGUI:
             self.log(f"Could not save settings: {exc}")
 
     def on_close(self):
+        if self._click_marker is not None and self._click_marker.winfo_exists():
+            self._click_marker.destroy()
         self._save_settings()
         self.root.destroy()
 
@@ -444,6 +454,39 @@ class SchedulerGUI:
         self._save_settings()
         self.log("Grid calibrated. Ready to Start.")
 
+    # --- Run click marker ---
+    def _show_click_marker(self, x, y):
+        """Show a short-lived red dot at the exact automated click location."""
+        def update_marker():
+            if self._click_marker is not None and self._click_marker.winfo_exists():
+                self._click_marker.destroy()
+            marker = tk.Toplevel(self.root)
+            marker.overrideredirect(True)
+            marker.attributes("-topmost", True)
+            marker.attributes("-alpha", 0.9)
+            # The marker is visual only; it must never become the click target.
+            # Make the overlay click-through on Windows where supported.
+            try:
+                marker.attributes("-transparentcolor", "red")
+            except tk.TclError:
+                pass
+            size = 18
+            marker.geometry(f"{size}x{size}+{int(x - size / 2)}+{int(y - size / 2)}")
+            canvas = tk.Canvas(marker, width=size, height=size, bg="red",
+                               highlightthickness=0)
+            canvas.create_oval(1, 1, size - 1, size - 1, fill="red", outline="white", width=2)
+            canvas.pack()
+            self._click_marker = marker
+            marker.after(650, lambda: self._hide_click_marker(marker))
+
+        self.root.after(0, update_marker)
+
+    def _hide_click_marker(self, marker):
+        if marker.winfo_exists():
+            marker.destroy()
+        if self._click_marker is marker:
+            self._click_marker = None
+
     # --- Start / Stop ---
     def start(self):
         if self.worker and self.worker.is_alive():
@@ -492,7 +535,7 @@ class SchedulerGUI:
                         return
                     time.sleep(0.02)
                 schedule_messages(base_time, total, interval, auto, *cal,
-                                  self.stop_event, self.log)
+                                  self.stop_event, self.log, self._show_click_marker)
                 self.log("Finished.")
             except _SchedulingStop:
                 self.log("Stopped.")
