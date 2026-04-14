@@ -7,12 +7,12 @@
   "hour": 3,
   "minute": 25,
   "mode": "auto",
-  "countdown": 0,
+  "countdown": 2,
   "use_text": true,
   "message": "\ud83c\udfb2 \u06af\u0631\u062f\u0648\u0646\u0647 \u0634\u0627\u0646\u0633",
-  "grid_ox": 1142,
-  "grid_oy": 449,
-  "grid_cw": 20,
-  "grid_ch": 1173,
-  "geometry": "477x361+108+-924"
+  "grid_ox": 898,
+  "grid_oy": 455,
+  "grid_cw": 604,
+  "grid_ch": 1035,
+  "geometry": "477x361+40+-970"
 }
