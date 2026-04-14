@@ -47,7 +47,7 @@ class _SchedulingStop(Exception):
 
 def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
                       cal_origin_x, cal_origin_y, cal_cell_w, cal_cell_h,
-                      stop_event, log, show_click, show_scheduled):
+                      typing_interval, stop_event, log, show_click, show_scheduled):
     """Runs the scheduling loop. `log` is a callable(msg) for progress output."""
     log("Starting... Press F9 (or slam mouse to a corner) to stop.")
 
@@ -88,10 +88,10 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
         log(f"[{day}/{total_messages}] {current_date:%Y-%m-%d} {time_string}")
 
         # 3. Type the calculated time into the time input box
-        pyautogui.press('backspace', presses=4, interval=0.12)  # Clear old time just in case
+        pyautogui.press('backspace', presses=4, interval=typing_interval)  # Clear old time just in case
         # Type slowly enough for Telegram's time field to process every
         # keystroke; otherwise digits can be dropped or reordered.
-        pyautogui.write(time_string, interval=0.12)
+        pyautogui.write(time_string, interval=typing_interval)
         nap(0.25)
 
         # 4. Focus the date picker / calendar.
@@ -131,7 +131,7 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
         pyautogui.press('enter')
 
         log(f"Scheduled {time_string}")
-        show_scheduled(day, total)
+        show_scheduled(day, total_messages)
         current_date += timedelta(days=1)  # advance to the next day
         nap(0.15)  # Brief pause before the next loop starts
 
@@ -154,6 +154,7 @@ class SchedulerGUI:
         # --- State variables ---
         self.var_total = tk.IntVar(value=62)
         self.var_interval = tk.IntVar(value=3)
+        self.var_typing_interval = tk.DoubleVar(value=0.12)
         self.var_year = tk.IntVar(value=2026)
         self.var_month = tk.IntVar(value=7)
         self.var_day = tk.IntVar(value=13)
@@ -210,41 +211,43 @@ class SchedulerGUI:
         ttk.Spinbox(g, from_=1, to=999, textvariable=self.var_total, width=5).grid(row=1, column=1, sticky="w")
         ttk.Label(g, text="Every min:").grid(row=1, column=2, sticky="w", padx=(6, 0))
         ttk.Spinbox(g, from_=1, to=720, textvariable=self.var_interval, width=4).grid(row=1, column=3, sticky="w")
+        ttk.Label(g, text="Typing s:").grid(row=2, column=0, sticky="w")
+        ttk.Spinbox(g, from_=0.01, to=2, increment=0.01, format="%0.2f", textvariable=self.var_typing_interval, width=5).grid(row=2, column=1, sticky="w")
 
         # Row 2: start datetime
-        ttk.Label(g, text="Start:").grid(row=2, column=0, sticky="w")
+        ttk.Label(g, text="Start:").grid(row=3, column=0, sticky="w")
         start = ttk.Frame(g)
-        start.grid(row=2, column=1, columnspan=3, sticky="w")
+        start.grid(row=3, column=1, columnspan=3, sticky="w")
         for var, lo, hi, w in [(self.var_day, 1, 31, 3), (self.var_month, 1, 12, 3),
                                (self.var_year, 2020, 2099, 5), (self.var_hour, 0, 23, 3),
                                (self.var_minute, 0, 59, 3)]:
             ttk.Spinbox(start, from_=lo, to=hi, textvariable=var, width=w).pack(side="left")
 
         # Row 3: mode radios
-        ttk.Radiobutton(g, text="Auto-click", variable=self.var_mode, value="auto").grid(row=3, column=0, columnspan=2, sticky="w")
-        ttk.Radiobutton(g, text="Manual day", variable=self.var_mode, value="manual").grid(row=3, column=2, columnspan=2, sticky="w")
+        ttk.Radiobutton(g, text="Auto-click", variable=self.var_mode, value="auto").grid(row=4, column=0, columnspan=2, sticky="w")
+        ttk.Radiobutton(g, text="Manual day", variable=self.var_mode, value="manual").grid(row=4, column=2, columnspan=2, sticky="w")
 
         # Row 4: calibration, single line
-        ttk.Label(g, text="Grid:").grid(row=4, column=0, sticky="w")
+        ttk.Label(g, text="Grid:").grid(row=5, column=0, sticky="w")
         cal = ttk.Frame(g)
-        cal.grid(row=4, column=1, columnspan=3, sticky="w")
+        cal.grid(row=5, column=1, columnspan=3, sticky="w")
         for label, var, lo, hi, w in [("O", self.var_ox, 0, 9999, 4), ("Y", self.var_oy, 0, 9999, 4),
                                       ("W", self.var_cw, 1, 999, 3), ("H", self.var_ch, 1, 999, 3)]:
             ttk.Label(cal, text=label).pack(side="left")
             ttk.Spinbox(cal, from_=lo, to=hi, textvariable=var, width=w).pack(side="left", padx=(1, 4))
         ttk.Button(cal, text="by Click", command=self.start_calibrate).pack(side="left", padx=(6, 0))
 
-        ttk.Label(g, text="Countdown s:").grid(row=5, column=0, sticky="w")
-        ttk.Spinbox(g, from_=0, to=30, increment=0.5, format="%0.1f", textvariable=self.var_countdown, width=4).grid(row=5, column=1, columnspan=3, sticky="w")
+        ttk.Label(g, text="Countdown s:").grid(row=6, column=0, sticky="w")
+        ttk.Spinbox(g, from_=0, to=30, increment=0.5, format="%0.1f", textvariable=self.var_countdown, width=4).grid(row=6, column=1, columnspan=3, sticky="w")
 
         # Row 6: live scheduling counter
         self.var_scheduled = tk.IntVar(value=0)
         self.scheduled_label = ttk.Label(g, text="Scheduled: 0 / 0")
-        self.scheduled_label.grid(row=6, column=0, columnspan=4, sticky="w", pady=(3, 0))
+        self.scheduled_label.grid(row=7, column=0, columnspan=4, sticky="w", pady=(3, 0))
 
         # Row 7: message text (compact)
         msg = ttk.LabelFrame(g, text="Message (optional)")
-        msg.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        msg.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self.message_text = tk.Text(msg, height=2, width=58, wrap="word")
         self.message_text.pack(side="left", fill="both", expand=True, padx=4, pady=2)
         self.use_msg_chk = ttk.Checkbutton(msg, text="Use above",
@@ -253,7 +256,7 @@ class SchedulerGUI:
 
         # Row 7: buttons
         btns = ttk.Frame(g)
-        btns.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        btns.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self.btn_start = ttk.Button(btns, text="Start Scheduling", command=self.start)
         self.btn_start.pack(side="left")
         self.btn_stop = ttk.Button(btns, text="Stop", command=self.stop, state="disabled")
@@ -294,6 +297,7 @@ class SchedulerGUI:
 
         self.var_total.set(data.get("total", 62))
         self.var_interval.set(data.get("interval", 3))
+        self.var_typing_interval.set(data.get("typing_interval", 0.12))
         self.var_year.set(data.get("year", 2026))
         self.var_month.set(data.get("month", 7))
         self.var_day.set(data.get("day", 13))
@@ -320,6 +324,7 @@ class SchedulerGUI:
         data = {
             "total": self.var_total.get(),
             "interval": self.var_interval.get(),
+            "typing_interval": self.var_typing_interval.get(),
             "year": self.var_year.get(),
             "month": self.var_month.get(),
             "day": self.var_day.get(),
@@ -554,6 +559,7 @@ class SchedulerGUI:
                         return
                     time.sleep(0.02)
                 schedule_messages(base_time, total, interval, auto, *cal,
+                                  self.var_typing_interval.get(),
                                   self.stop_event, self.log, self._show_click_marker,
                                   self._update_scheduled_counter)
                 self.log("Finished.")
