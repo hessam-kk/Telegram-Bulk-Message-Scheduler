@@ -415,11 +415,17 @@ class SchedulerGUI:
         self.log(f"Starting in {countdown}s. Switch to Telegram Desktop now!")
 
         def _run():
-            time.sleep(countdown)
-            schedule_messages(base_time, total, interval, auto, *cal,
-                              self.stop_event, self.log)
-            self.log("Finished.")
-            self.root.after(0, self.reset_buttons)
+            try:
+                time.sleep(countdown)
+                schedule_messages(base_time, total, interval, auto, *cal,
+                                  self.stop_event, self.log)
+                self.log("Finished.")
+            except Exception as exc:
+                self.log(f"ERROR: {exc}")
+            finally:
+                # Always re-enable the buttons, even if the run crashed (e.g.
+                # pyautogui failsafe, automation error, etc.).
+                self.root.after(0, self.reset_buttons)
 
         self.worker = threading.Thread(target=_run, daemon=True)
         self.worker.start()
