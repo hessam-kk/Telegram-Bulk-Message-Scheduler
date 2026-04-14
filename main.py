@@ -35,13 +35,27 @@ def get_date_cell(target_date, origin_x, origin_y, cell_w, cell_h):
         origin_y + row * cell_h + cell_h // 2,
     )
 
+class _SchedulingStop(Exception):
+    """Raised to abort a run the instant the user asks to stop."""
+    pass
+
 
 def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
                       cal_origin_x, cal_origin_y, cal_cell_w, cal_cell_h,
                       stop_event, log):
     """Runs the scheduling loop. `log` is a callable(msg) for progress output."""
-    log("Starting... Switch to Telegram Desktop. FAILSAFE ON: slam mouse into a corner to stop.")
-    time.sleep(1)
+    log("Starting... Press F9 (or slam mouse to a corner) to stop.")
+
+    # Used so that sleeping is interruptible: 'nap' checks the stop flag every
+    # ~20ms and aborts immediately instead of waiting out a long time.sleep().
+    def nap(seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            if stop_event.is_set():
+                raise _SchedulingStop
+            time.sleep(0.02)
+
+    nap(1.0)
 
     # Telegram's calendar opens on the current month, so this is the anchor for
     # month navigation and is recomputed against the real "today" each run.
@@ -51,16 +65,15 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
 
     for day in range(1, total_messages + 1):
         if stop_event.is_set():
-            log("Stopped by user.")
-            return
+            raise _SchedulingStop
 
         # 1. Paste the command
         pyautogui.hotkey('ctrl', 'v')
-        time.sleep(0.2)
+        nap(0.2)
 
         # 2. Open the schedule dialog
         pyautogui.press('enter')
-        time.sleep(0.3)
+        nap(0.3)
 
         # Calculate the new time (shifting the clock forward by interval per loop)
         run_time = base_time + timedelta(minutes=interval_minutes * day)
@@ -70,11 +83,11 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
         # 3. Type the calculated time into the time input box
         pyautogui.press('backspace', presses=4, interval=0.05)  # Clear old time just in case
         pyautogui.write(time_string)
-        time.sleep(0.1)
+        nap(0.1)
 
         # 4. Focus the date picker / calendar.
         pyautogui.press('tab')
-        time.sleep(0.2)
+        nap(0.2)
 
         if auto_click:
             # 4a. Advance to the correct month. The picker reopens on today's
@@ -85,7 +98,7 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
             )
             if months_to_advance > 0:
                 pyautogui.press('down', presses=months_to_advance, interval=0.1)
-                time.sleep(0.3)  # give the UI time to switch months
+                nap(0.3)  # give the UI time to switch months
                 log(f"  advanced calendar {months_to_advance} month(s) to {current_date:%b %Y}")
             elif months_to_advance < 0:
                 log(f"  WARNING: {current_date:%Y-%m-%d} is before today; "
@@ -95,20 +108,20 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
             cx, cy = get_date_cell(current_date, cal_origin_x, cal_origin_y,
                                    cal_cell_w, cal_cell_h)
             pyautogui.moveTo(cx, cy)
-            time.sleep(0.1)
+            nap(0.1)
             pyautogui.click(button='left')
-            time.sleep(0.2)
+            nap(0.2)
         else:
             # 4a (manual): User clicks the day by hand.
             log(f"[{day}/{total_messages}] Click the day yourself...")
-            time.sleep(1.0)
+            nap(1.0)
 
         # 5. Confirm the schedule
         pyautogui.press('enter')
 
         log(f"Scheduled {time_string}")
         current_date += timedelta(days=1)  # advance to the next day
-        time.sleep(0.15)  # Brief pause before the next loop starts
+        nap(0.15)  # Brief pause before the next loop starts
 
 
 class SchedulerGUI:
@@ -141,6 +154,7 @@ class SchedulerGUI:
         self.var_oy = tk.IntVar(value=454)
         self.var_cw = tk.IntVar(value=63)
         self.var_ch = tk.IntVar(value=50)
+        self.kb_listener = None
 
         # Calibration-by-click state (pynput listener).
         self.calib_clicks = None
@@ -161,13 +175,14 @@ class SchedulerGUI:
         # Helpful nudge on first row of config.
         tip = tk.Label(self.tab_cfg,
                        text="Copy this window to a corner first, so it won't cover the calendar.\n"
-                            "Switch focus to Telegram during the countdown.",
+                            "Switch focus to Telegram during the countdown.  Press F9 to STOP anytime.",
                        justify="left", anchor="w", fg="gray")
         tip.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 2))
 
         # Restore last-used settings (JSON) and keep them saved on close.
         self._load_settings()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._start_stop_hotkey()
 
         root.after(100, self.poll_log_queue)
 
@@ -416,10 +431,18 @@ class SchedulerGUI:
 
         def _run():
             try:
-                time.sleep(countdown)
+                # Interruptible countdown, so F9 works even before scheduling starts.
+                deadline = time.time() + countdown
+                while time.time() < deadline:
+                    if self.stop_event.is_set():
+                        self.log("Stopped before starting.")
+                        return
+                    time.sleep(0.02)
                 schedule_messages(base_time, total, interval, auto, *cal,
                                   self.stop_event, self.log)
                 self.log("Finished.")
+            except _SchedulingStop:
+                self.log("Stopped.")
             except Exception as exc:
                 self.log(f"ERROR: {exc}")
             finally:
@@ -440,6 +463,32 @@ class SchedulerGUI:
     def reset_buttons(self):
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
+
+    def _start_stop_hotkey(self):
+        """Watch for F9 anywhere on screen and abort a run instantly.
+
+        Uses pynput (the same optional lib as click-calibration). If it's not
+        installed, the corner-failsafe still works as a fallback.
+        """
+        try:
+            from pynput import keyboard
+        except ImportError:
+            return
+
+        def on_press(key):
+            try:
+                if key == keyboard.Key.f9:
+                    self.stop()
+            except Exception:
+                pass
+
+        try:
+            listener = keyboard.Listener(on_press=on_press)
+            listener.daemon = True
+            listener.start()
+            self.kb_listener = listener
+        except Exception:
+            self.kb_listener = None
 
 
 def main():
