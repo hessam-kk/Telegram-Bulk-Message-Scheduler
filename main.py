@@ -88,9 +88,11 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
         log(f"[{day}/{total_messages}] {current_date:%Y-%m-%d} {time_string}")
 
         # 3. Type the calculated time into the time input box
-        pyautogui.press('backspace', presses=4, interval=0.05)  # Clear old time just in case
-        pyautogui.write(time_string)
-        nap(0.1)
+        pyautogui.press('backspace', presses=4, interval=0.12)  # Clear old time just in case
+        # Type slowly enough for Telegram's time field to process every
+        # keystroke; otherwise digits can be dropped or reordered.
+        pyautogui.write(time_string, interval=0.12)
+        nap(0.25)
 
         # 4. Focus the date picker / calendar.
         pyautogui.press('tab')
