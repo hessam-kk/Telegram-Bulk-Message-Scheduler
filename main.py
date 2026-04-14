@@ -341,6 +341,7 @@ class SchedulerGUI:
 
         self.calib_clicks = []
         self.btn_start.configure(state="disabled")
+        self.btn_stop.configure(state="disabled")
         self.log("CALIBRATE: click the TOP-LEFT calendar cell (Sun, week 1).")
         self.log("Then the cell to its RIGHT, then the cell BELOW it. 3 clicks total.")
         self._mouse_listener = mouse.Listener(
@@ -395,6 +396,7 @@ class SchedulerGUI:
     # --- Start / Stop ---
     def start(self):
         if self.worker and self.worker.is_alive():
+            self.log("A previous run is still stopping. Please wait a moment.")
             return
         try:
             base_time = datetime(self.var_year.get(), self.var_month.get(), self.var_day.get(),
@@ -455,14 +457,22 @@ class SchedulerGUI:
         self._save_settings()
 
     def stop(self):
+        if not self.worker or not self.worker.is_alive():
+            self.reset_buttons()
+            return
         if self.stop_event.is_set():
             return
         self.log("Stop requested...")
         self.stop_event.set()
+        # Restore the controls immediately; the worker will finish its current
+        # PyAutoGUI call and then exit at its next interruptible checkpoint.
+        self.btn_start.configure(state="normal")
+        self.btn_stop.configure(state="disabled")
 
     def reset_buttons(self):
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
+        self.worker = None
 
     def _start_stop_hotkey(self):
         """Watch for F9 anywhere on screen and abort a run instantly.
