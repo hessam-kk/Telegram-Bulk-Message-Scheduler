@@ -355,7 +355,7 @@ class SchedulerGUI:
         if pressed:
             self.calib_clicks.append((x, y))
             self.root.after(0, self._apply_calib_click)
-        return False  # keep listening until stopped
+        return True  # keep listening until explicitly stopped
 
     def _apply_calib_click(self):
         n = len(self.calib_clicks)
@@ -383,13 +383,19 @@ class SchedulerGUI:
             self._stop_calibrate()
 
     def _stop_calibrate(self):
-        if self._mouse_listener is not None:
+        listener = self._mouse_listener
+        self._mouse_listener = None
+        if listener is not None:
             try:
-                self._mouse_listener.stop()
+                listener.stop()
             except Exception:
                 pass
-            self._mouse_listener = None
+        # Marshal all widget updates onto Tk's GUI thread.
+        self.root.after(0, self._finish_calibration)
+
+    def _finish_calibration(self):
         self.btn_start.configure(state="normal")
+        self.btn_stop.configure(state="disabled")
         self._save_settings()
         self.log("Grid calibrated. Ready to Start.")
 
