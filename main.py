@@ -47,7 +47,7 @@ class _SchedulingStop(Exception):
 
 def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
                       cal_origin_x, cal_origin_y, cal_cell_w, cal_cell_h,
-                      stop_event, log, show_click):
+                      stop_event, log, show_click, show_scheduled):
     """Runs the scheduling loop. `log` is a callable(msg) for progress output."""
     log("Starting... Press F9 (or slam mouse to a corner) to stop.")
 
@@ -131,6 +131,7 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
         pyautogui.press('enter')
 
         log(f"Scheduled {time_string}")
+        show_scheduled(day, total)
         current_date += timedelta(days=1)  # advance to the next day
         nap(0.15)  # Brief pause before the next loop starts
 
@@ -236,9 +237,14 @@ class SchedulerGUI:
         ttk.Label(g, text="Countdown s:").grid(row=5, column=0, sticky="w")
         ttk.Spinbox(g, from_=0, to=30, textvariable=self.var_countdown, width=4).grid(row=5, column=1, columnspan=3, sticky="w")
 
-        # Row 6: message text (compact)
+        # Row 6: live scheduling counter
+        self.var_scheduled = tk.IntVar(value=0)
+        self.scheduled_label = ttk.Label(g, text="Scheduled: 0 / 0")
+        self.scheduled_label.grid(row=6, column=0, columnspan=4, sticky="w", pady=(3, 0))
+
+        # Row 7: message text (compact)
         msg = ttk.LabelFrame(g, text="Message (optional)")
-        msg.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        msg.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self.message_text = tk.Text(msg, height=2, width=58, wrap="word")
         self.message_text.pack(side="left", fill="both", expand=True, padx=4, pady=2)
         self.use_msg_chk = ttk.Checkbutton(msg, text="Use above",
@@ -247,7 +253,7 @@ class SchedulerGUI:
 
         # Row 7: buttons
         btns = ttk.Frame(g)
-        btns.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        btns.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         self.btn_start = ttk.Button(btns, text="Start Scheduling", command=self.start)
         self.btn_start.pack(side="left")
         self.btn_stop = ttk.Button(btns, text="Stop", command=self.stop, state="disabled")
@@ -459,6 +465,13 @@ class SchedulerGUI:
         self.log("Grid calibrated. Ready to Start.")
 
     # --- Run click marker ---
+    def _update_scheduled_counter(self, scheduled, total):
+        self.root.after(0, lambda: self._set_scheduled_counter(scheduled, total))
+
+    def _set_scheduled_counter(self, scheduled, total):
+        self.var_scheduled.set(scheduled)
+        self.scheduled_label.configure(text=f"Scheduled: {scheduled} / {total}")
+
     def _show_click_marker(self, x, y):
         """Show a short-lived red dot at the exact automated click location."""
         def update_marker():
@@ -523,6 +536,8 @@ class SchedulerGUI:
                self.var_cw.get(), self.var_ch.get())
 
         self.stop_event.clear()
+        self.var_scheduled.set(0)
+        self.scheduled_label.configure(text=f"Scheduled: 0 / {total}")
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
 
@@ -539,7 +554,8 @@ class SchedulerGUI:
                         return
                     time.sleep(0.02)
                 schedule_messages(base_time, total, interval, auto, *cal,
-                                  self.stop_event, self.log, self._show_click_marker)
+                                  self.stop_event, self.log, self._show_click_marker,
+                                  self._update_scheduled_counter)
                 self.log("Finished.")
             except _SchedulingStop:
                 self.log("Stopped.")
