@@ -160,7 +160,7 @@ class SchedulerGUI:
         self.var_hour = tk.IntVar(value=22)
         self.var_minute = tk.IntVar(value=15)
         self.var_mode = tk.StringVar(value="auto")
-        self.var_countdown = tk.IntVar(value=1)
+        self.var_countdown = tk.DoubleVar(value=1.0)
         self.var_use_text = tk.BooleanVar(value=True)
         self.var_ox = tk.IntVar(value=771)
         self.var_oy = tk.IntVar(value=454)
@@ -235,7 +235,7 @@ class SchedulerGUI:
         ttk.Button(cal, text="by Click", command=self.start_calibrate).pack(side="left", padx=(6, 0))
 
         ttk.Label(g, text="Countdown s:").grid(row=5, column=0, sticky="w")
-        ttk.Spinbox(g, from_=0, to=30, textvariable=self.var_countdown, width=4).grid(row=5, column=1, columnspan=3, sticky="w")
+        ttk.Spinbox(g, from_=0, to=30, increment=0.5, format="%0.1f", textvariable=self.var_countdown, width=4).grid(row=5, column=1, columnspan=3, sticky="w")
 
         # Row 6: live scheduling counter
         self.var_scheduled = tk.IntVar(value=0)
@@ -537,7 +537,7 @@ class SchedulerGUI:
 
         self.stop_event.clear()
         self.var_scheduled.set(0)
-        self.scheduled_label.configure(text=f"Scheduled: 0 / {total}")
+        self.scheduled_label.configure(text=f"Scheduled: 0 / {self.var_total.get()}")
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
 
