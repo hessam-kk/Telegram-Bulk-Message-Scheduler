@@ -4,10 +4,62 @@ import queue
 import threading
 import time
 import tkinter as tk
+import types
 from datetime import datetime, timedelta
 from tkinter import messagebox, ttk
 
-import pyautogui
+
+class _LazyPyAutoGUI:
+    """Module-shaped placeholder so early reads don't trigger the slow import.
+
+    The first real use (startup of the scheduler, calibration, or hotkey
+    listener) replaces this with the real ``pyautogui`` module through
+    ``_ensure_pyautogui()``.
+    """
+
+    def __getattr__(self, name):
+        _ensure_pyautogui()
+        return getattr(pyautogui, name)
+
+
+class _PyAutoGUILazyWrapper:
+    """Proxy that lets ``unittest.mock.patch.object`` swap a pyautogui method
+
+    without triggering the slow real import. Attribute access is forwarded to
+    the real module once it has been imported, and the wrapper keeps the
+    module-level ``pyautogui.FAILSAFE`` attribute available at startup.
+    """
+
+    def __getattr__(self, name):
+        if name == "FAILSAFE":
+            return pyautogui.FAILSAFE
+        _ensure_pyautogui()
+        return getattr(pyautogui, name)
+
+    def __setattr__(self, name, value):
+        if name == "FAILSAFE":
+            object.__setattr__(self, "FAILSAFE", value)
+            return
+        _ensure_pyautogui()
+        setattr(pyautogui, name, value)
+
+    def __delattr__(self, name):
+        _ensure_pyautogui()
+        delattr(pyautogui, name)
+
+    def __call__(self, *args, **kwargs):
+        _ensure_pyautogui()
+        return pyautogui(*args, **kwargs)
+
+
+def _ensure_pyautogui():
+    """Import pyautogui on first real need so the Tk startup path is fast."""
+    global pyautogui
+    if not isinstance(pyautogui, types.ModuleType):
+        import importlib
+        real = importlib.import_module("pyautogui")
+        pyautogui = real
+
 
 # Settings are stored next to this script so they load automatically on launch.
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -27,6 +79,7 @@ LOG_FG = "#c7cbd1"
 
 # --- FAILSAFE ---
 # Moving your mouse to any corner of the screen will instantly stop the script!
+pyautogui = _PyAutoGUILazyWrapper()
 pyautogui.FAILSAFE = True
 
 
