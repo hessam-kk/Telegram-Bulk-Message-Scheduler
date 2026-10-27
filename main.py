@@ -1,12 +1,14 @@
 import json
 import os
 import queue
+import sys
 import threading
 import time
-import tkinter as tk
 import types
 from datetime import datetime, timedelta
-from tkinter import messagebox, ttk
+
+from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtCore import Qt, Signal
 
 
 class _LazyPyAutoGUI:
@@ -53,7 +55,7 @@ class _PyAutoGUILazyWrapper:
 
 
 def _ensure_pyautogui():
-    """Import pyautogui on first real need so the Tk startup path is fast."""
+    """Import pyautogui on first real need so the GUI startup path is fast."""
     global pyautogui
     if not isinstance(pyautogui, types.ModuleType):
         import importlib
@@ -76,6 +78,92 @@ GREEN = "#2e9e4f"   # Start button
 RED = "#d93a3a"     # Stop button
 LOG_BG = "#141518"
 LOG_FG = "#c7cbd1"
+
+# Qt counterpart of the Tk "clam" theme configured in the old GUI.
+STYLESHEET = f"""
+QWidget {{
+    background: {BG};
+    color: {FG};
+    font-family: "Segoe UI";
+    font-size: 9pt;
+}}
+QLabel {{ background: transparent; }}
+QGroupBox {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    margin-top: 11px;
+    padding: 8px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 8px;
+    padding: 0 4px;
+    color: {ACCENT};
+    font-weight: bold;
+}}
+QLabel#Preview {{ color: {MUTED}; font-size: 8pt; }}
+QLabel#Outer {{ color: {MUTED}; }}
+QSpinBox, QDoubleSpinBox {{
+    background: {FIELD};
+    color: {FG};
+    border: 1px solid {BORDER};
+    border-radius: 3px;
+    padding: 1px 3px;
+}}
+QSpinBox:disabled, QDoubleSpinBox:disabled {{ color: {MUTED}; }}
+QPlainTextEdit {{
+    background: {FIELD};
+    color: {FG};
+    border: 1px solid {BORDER};
+    border-radius: 3px;
+}}
+QPlainTextEdit#Log {{
+    background: {LOG_BG};
+    color: {LOG_FG};
+    font-family: Consolas;
+    font-size: 8pt;
+}}
+QCheckBox, QRadioButton {{ background: transparent; color: {FG}; spacing: 6px; }}
+QPushButton {{
+    background: {FIELD};
+    color: {FG};
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    padding: 3px 10px;
+}}
+QPushButton:hover {{ background: #43474e; }}
+QPushButton:disabled {{ color: {MUTED}; }}
+QPushButton#Start {{
+    background: {GREEN};
+    color: white;
+    font-weight: bold;
+    padding: 5px 14px;
+    border: none;
+}}
+QPushButton#Start:hover {{ background: #258742; }}
+QPushButton#Start:disabled {{ background: #2b3a2f; color: #6f8b76; }}
+QPushButton#Stop {{
+    background: {RED};
+    color: white;
+    font-weight: bold;
+    padding: 5px 12px;
+    border: none;
+}}
+QPushButton#Stop:hover {{ background: #b32c2c; }}
+QPushButton#Stop:disabled {{ background: #3a2b2b; color: #8b6f6f; }}
+QProgressBar {{
+    background: {FIELD};
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    text-align: center;
+}}
+QProgressBar::chunk {{ background: {GREEN}; border-radius: 3px; }}
+QScrollBar:vertical {{ background: {CARD}; width: 10px; margin: 0; }}
+QScrollBar::handle:vertical {{ background: {BORDER}; border-radius: 5px; min-height: 20px; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+"""
 
 # --- FAILSAFE ---
 # Moving your mouse to any corner of the screen will instantly stop the script!
@@ -129,10 +217,10 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
     nap(1.0)
 
     # Telegram's calendar opens on the current month, so this is the anchor for
-    # month navigation and is recomputed against the real "today" each run.    today = datetime.now()
+    # month navigation and is recomputed against the real "today" each run.
+    today = datetime.now()
     # The date of the first scheduled message; each next message is a day later.
     current_date = base_time.replace(hour=0, minute=0, second=0, microsecond=0)
-
 
     for day in range(1, total_messages + 1):
         if stop_event.is_set():
@@ -202,256 +290,290 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
         nap(0.15)  # Brief pause before the next loop starts
 
 
-class SchedulerGUI:
-    def __init__(self, root, log_queue):
-        self.root = root
+class _ClickMarker(QtWidgets.QWidget):
+    """Short-lived, click-through red dot drawn at the automated click spot."""
+
+    SIZE = 18
+
+    def __init__(self, x, y):
+        super().__init__(
+            None,
+            Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+            | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus,
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.resize(self.SIZE, self.SIZE)
+        self.move(int(x - self.SIZE / 2), int(y - self.SIZE / 2))
+
+    def paintEvent(self, event):  # noqa: N802 (Qt naming)
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setBrush(QtGui.QColor("red"))
+        painter.setPen(QtGui.QPen(QtGui.QColor("white"), 2))
+        inset = 2
+        painter.drawEllipse(inset, inset, self.SIZE - 2 * inset, self.SIZE - 2 * inset)
+
+
+class SchedulerGUI(QtWidgets.QWidget):
+    # Worker-thread callbacks are marshalled onto the GUI thread through these.
+    click_requested = Signal(int, int)
+    scheduled_updated = Signal(int, int)
+    reset_requested = Signal()
+    stop_requested = Signal()
+    calibration_clicked = Signal()
+
+    def __init__(self, log_queue, parent=None):
+        super().__init__(parent)
         self.log_queue = log_queue
         self.stop_event = threading.Event()
         self.worker = None
-        self._setup_theme()
-
-        root.title("Bulkmail Scheduler")
-        root.configure(bg=BG)
-        root.resizable(True, True)
-        root.minsize(width=380, height=440)
-
-        # --- State variables ---
-        self.var_total = tk.IntVar(value=62)
-        self.var_interval = tk.IntVar(value=3)
-        self.var_typing_interval = tk.DoubleVar(value=0.12)
-        self.var_year = tk.IntVar(value=2026)
-        self.var_month = tk.IntVar(value=7)
-        self.var_day = tk.IntVar(value=13)
-        self.var_hour = tk.IntVar(value=22)
-        self.var_minute = tk.IntVar(value=15)
-        self.var_mode = tk.StringVar(value="auto")
-        self.var_countdown = tk.DoubleVar(value=1.0)
-        self.var_use_text = tk.BooleanVar(value=True)
-        self.var_ox = tk.IntVar(value=771)
-        self.var_oy = tk.IntVar(value=454)
-        self.var_cw = tk.IntVar(value=63)
-        self.var_ch = tk.IntVar(value=50)
         self.kb_listener = None
 
         # Calibration-by-click state (pynput listener).
         self.calib_clicks = None
         self._mouse_listener = None
         self._calibration_overlay = None
+        self._calibration_label = None
         self._click_marker = None
 
-        tip = tk.Label(root,
-                       text="ⓘ  Keep this window clear of the calendar  ·  F9 = emergency stop",
-                       bg=BG, fg=MUTED, font=("Segoe UI", 8))
-        tip.pack(fill="x", padx=10, pady=(6, 2))
+        self.setWindowTitle("Bulkmail Scheduler")
+        self.setStyleSheet(STYLESHEET)
+        self.resize(470, 630)
+        self.setMinimumSize(380, 440)
 
-        # One page, five sections: everything visible without tab switching.
-        self._build_schedule_card()
-        self._build_automation_card()
-        self._build_message_card()
-        self._build_log_area()
-        self._build_action_bar()
+        self._build_ui()
+        self._connect_signals()
 
         # Restore last-used settings (JSON) and keep them saved on close.
         self._load_settings()
-        root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._start_stop_hotkey()
 
-        root.after(100, self.poll_log_queue)
+        self._poll_timer = QtCore.QTimer(self)
+        self._poll_timer.timeout.connect(self.poll_log_queue)
+        self._poll_timer.start(100)
+
         self._update_preview()
 
-    # --- Theme ---
-    def _setup_theme(self):
-        """Dark, Telegram-inspired look built on the stylable 'clam' theme."""
-        style = ttk.Style(self.root)
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-        style.configure(".", background=CARD, foreground=FG, font=("Segoe UI", 9))
-        style.configure("TFrame", background=CARD)
-        style.configure("Card.TLabelframe", background=CARD, bordercolor=BORDER,
-                        lightcolor=BORDER, darkcolor=BORDER, borderwidth=1)
-        style.configure("Card.TLabelframe.Label", background=CARD,
-                        foreground=ACCENT, font=("Segoe UI", 9, "bold"))
-        style.configure("TLabel", background=CARD, foreground=FG)
-        style.configure("Outer.TLabel", background=BG, foreground=MUTED)
-        style.configure("Preview.TLabel", background=CARD, foreground=MUTED,
-                        font=("Segoe UI", 8))
-        style.configure("TSpinbox", fieldbackground=FIELD, background=FIELD,
-                        foreground=FG, arrowcolor=FG, insertcolor=FG,
-                        bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER)
-        style.map("TSpinbox", fieldbackground=[("readonly", FIELD)],
-                  foreground=[("disabled", MUTED)])
-        style.configure("TButton", background=FIELD, foreground=FG,
-                        bordercolor=BORDER, lightcolor=FIELD, darkcolor=FIELD)
-        style.map("TButton",
-                  background=[("active", "#43474e"), ("disabled", FIELD)],
-                  foreground=[("disabled", MUTED)])
-        style.configure("green.Horizontal.TProgressbar", troughcolor=FIELD,
-                        background=GREEN, bordercolor=CARD,
-                        lightcolor=GREEN, darkcolor=GREEN)
+    # --- Widget helpers ---
+    def _make_spin(self, parent, lo, hi, width, increment=1, decimals=0):
+        """A compact, dark spin box sized roughly like the old char-width."""
+        if decimals:
+            box = QtWidgets.QDoubleSpinBox(parent)
+            box.setDecimals(decimals)
+            box.setSingleStep(increment)
+        else:
+            box = QtWidgets.QSpinBox(parent)
+            box.setSingleStep(int(increment))
+        box.setRange(lo, hi)
+        box.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        box.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        box.setFixedWidth(20 + 7 * width)
+        return box
 
-    def _spin(self, parent, var, lo, hi, width, increment=None, fmt=None):
-        kw = {"from_": lo, "to": hi, "textvariable": var, "width": width}
-        if increment is not None:
-            kw["increment"] = increment
-        if fmt:
-            kw["format"] = fmt
-        return ttk.Spinbox(parent, **kw)
+    def _sep(self, parent, text):
+        label = QtWidgets.QLabel(text, parent)
+        label.setStyleSheet(f"color: {MUTED};")
+        return label
 
-    def _check_kwargs(self):
-        """Consistent dark look for classic radio/check buttons."""
-        return dict(bg=CARD, fg=FG, activebackground=CARD, activeforeground=FG,
-                    selectcolor=FIELD, highlightthickness=0, bd=0,
-                    cursor="hand2", font=("Segoe UI", 9))
+    def _row(self, parent):
+        layout = QtWidgets.QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        return layout
 
     # --- Section builders ---
-    def _build_schedule_card(self):
-        card = ttk.Labelframe(self.root, text="  Schedule ",
-                              style="Card.TLabelframe", padding=8)
-        card.pack(fill="x", padx=8, pady=(2, 4))
+    def _build_ui(self):
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(10, 6, 10, 8)
+        outer.setSpacing(4)
 
-        row1 = tk.Frame(card, bg=CARD)
-        row1.pack(fill="x")
-        ttk.Label(row1, text="Start").pack(side="left", padx=(0, 6))
-        self._spin(row1, self.var_day, 1, 31, 3).pack(side="left", padx=1)
-        ttk.Label(row1, text="·", foreground=MUTED).pack(side="left", padx=1)
-        self._spin(row1, self.var_month, 1, 12, 3).pack(side="left", padx=1)
-        ttk.Label(row1, text="·", foreground=MUTED).pack(side="left", padx=1)
-        self._spin(row1, self.var_year, 2020, 2099, 5).pack(side="left", padx=1)
-        ttk.Label(row1, text="at", foreground=MUTED).pack(side="left", padx=(8, 4))
-        self._spin(row1, self.var_hour, 0, 23, 3).pack(side="left", padx=1)
-        ttk.Label(row1, text=":", foreground=MUTED).pack(side="left", padx=1)
-        self._spin(row1, self.var_minute, 0, 59, 3).pack(side="left", padx=1)
+        tip = QtWidgets.QLabel(
+            "ⓘ  Keep this window clear of the calendar  ·  F9 = emergency stop",
+            self,
+        )
+        tip.setStyleSheet(f"color: {MUTED}; font-size: 8pt;")
+        outer.addWidget(tip)
 
-        row2 = tk.Frame(card, bg=CARD)
-        row2.pack(fill="x", pady=(4, 0))
-        ttk.Label(row2, text="Messages").pack(side="left", padx=(0, 6))
-        self._spin(row2, self.var_total, 1, 999, 5).pack(side="left", padx=1)
-        ttk.Label(row2, text="every", foreground=MUTED).pack(side="left", padx=(10, 4))
-        self._spin(row2, self.var_interval, 1, 720, 4).pack(side="left", padx=1)
-        ttk.Label(row2, text="min", foreground=MUTED).pack(side="left", padx=2)
+        # One page, five sections: everything visible without tab switching.
+        self._build_schedule_card(outer)
+        self._build_automation_card(outer)
+        self._build_message_card(outer)
+        self._build_log_area(outer)
+        self._build_action_bar(outer)
+
+    def _build_schedule_card(self, parent):
+        card = QtWidgets.QGroupBox("  Schedule  ", self)
+        box = QtWidgets.QVBoxLayout(card)
+        box.setSpacing(6)
+
+        row1 = self._row(card)
+        row1.addWidget(QtWidgets.QLabel("Start", card))
+        self.spin_day = self._make_spin(card, 1, 31, 3)
+        self.spin_month = self._make_spin(card, 1, 12, 3)
+        self.spin_year = self._make_spin(card, 2020, 2099, 5)
+        self.spin_hour = self._make_spin(card, 0, 23, 3)
+        self.spin_minute = self._make_spin(card, 0, 59, 3)
+        for widget in (self.spin_day, self._sep(card, "·"), self.spin_month,
+                       self._sep(card, "·"), self.spin_year):
+            row1.addWidget(widget)
+        row1.addWidget(self._sep(card, "at"))
+        row1.addWidget(self.spin_hour)
+        row1.addWidget(self._sep(card, ":"))
+        row1.addWidget(self.spin_minute)
+        row1.addStretch(1)
+        box.addLayout(row1)
+
+        row2 = self._row(card)
+        row2.addWidget(QtWidgets.QLabel("Messages", card))
+        self.spin_total = self._make_spin(card, 1, 999, 5)
+        self.spin_interval = self._make_spin(card, 1, 720, 4)
+        row2.addWidget(self.spin_total)
+        row2.addWidget(self._sep(card, "every"))
+        row2.addWidget(self.spin_interval)
+        row2.addWidget(self._sep(card, "min"))
+        row2.addStretch(1)
+        box.addLayout(row2)
 
         # Live first/last preview so the whole plan is visible before starting.
-        self.preview_label = ttk.Label(card, text="", style="Preview.TLabel")
-        self.preview_label.pack(fill="x", pady=(6, 0))
-        for var in (self.var_total, self.var_interval, self.var_day,
-                    self.var_month, self.var_year, self.var_hour,
-                    self.var_minute):
-            var.trace_add("write", self._update_preview)
+        self.preview_label = QtWidgets.QLabel("", card)
+        self.preview_label.setObjectName("Preview")
+        self.preview_label.setWordWrap(True)
+        box.addWidget(self.preview_label)
 
-    def _build_automation_card(self):
-        card = ttk.Labelframe(self.root, text="  Automation ",
-                              style="Card.TLabelframe", padding=8)
-        card.pack(fill="x", padx=8, pady=(0, 4))
+        parent.addWidget(card)
 
-        row = tk.Frame(card, bg=CARD)
-        row.pack(fill="x")
-        tk.Radiobutton(row, text="Auto-click calendar", variable=self.var_mode,
-                       value="auto", **self._check_kwargs()).pack(side="left")
-        tk.Radiobutton(row, text="Manual day", variable=self.var_mode,
-                       value="manual", **self._check_kwargs()).pack(side="left", padx=(14, 0))
+    def _build_automation_card(self, parent):
+        card = QtWidgets.QGroupBox("  Automation  ", self)
+        box = QtWidgets.QVBoxLayout(card)
+        box.setSpacing(6)
 
-        row2 = tk.Frame(card, bg=CARD)
-        row2.pack(fill="x", pady=(4, 0))
-        ttk.Label(row2, text="Start delay").pack(side="left", padx=(0, 4))
-        self._spin(row2, self.var_countdown, 0, 30, 4, increment=0.5,
-                   fmt="%0.1f").pack(side="left", padx=1)
-        ttk.Label(row2, text="s", foreground=MUTED).pack(side="left", padx=2)
-        ttk.Label(row2, text="Typing speed").pack(side="left", padx=(16, 4))
-        self._spin(row2, self.var_typing_interval, 0.01, 2, 5, increment=0.01,
-                   fmt="%0.2f").pack(side="left", padx=1)
-        ttk.Label(row2, text="s/char", foreground=MUTED).pack(side="left", padx=2)
+        row1 = self._row(card)
+        self.radio_auto = QtWidgets.QRadioButton("Auto-click calendar", card)
+        self.radio_manual = QtWidgets.QRadioButton("Manual day", card)
+        self.radio_auto.setChecked(True)
+        mode_group = QtWidgets.QButtonGroup(card)
+        mode_group.addButton(self.radio_auto)
+        mode_group.addButton(self.radio_manual)
+        self._mode_group = mode_group
+        row1.addWidget(self.radio_auto)
+        row1.addWidget(self.radio_manual)
+        row1.addStretch(1)
+        box.addLayout(row1)
 
-        row3 = tk.Frame(card, bg=CARD)
-        row3.pack(fill="x", pady=(4, 0))
-        ttk.Label(row3, text="Grid").pack(side="left", padx=(0, 4))
-        for label, var, lo, hi, w in [("O", self.var_ox, 0, 9999, 4),
-                                      ("Y", self.var_oy, 0, 9999, 4),
-                                      ("W", self.var_cw, 1, 999, 3),
-                                      ("H", self.var_ch, 1, 999, 3)]:
-            ttk.Label(row3, text=label, foreground=MUTED).pack(side="left", padx=(4, 1))
-            self._spin(row3, var, lo, hi, w).pack(side="left", padx=1)
-        ttk.Button(row3, text="Calibrate by click…",
-                   command=self.start_calibrate).pack(side="left", padx=(10, 0))
+        row2 = self._row(card)
+        self.spin_countdown = self._make_spin(card, 0, 30, 4, increment=0.5, decimals=2)
+        self.spin_typing = self._make_spin(card, 0.01, 2, 5, increment=0.01, decimals=2)
+        row2.addWidget(QtWidgets.QLabel("Start delay", card))
+        row2.addWidget(self.spin_countdown)
+        row2.addWidget(self._sep(card, "s"))
+        row2.addWidget(QtWidgets.QLabel("Typing speed", card))
+        row2.addWidget(self.spin_typing)
+        row2.addWidget(self._sep(card, "s/char"))
+        row2.addStretch(1)
+        box.addLayout(row2)
 
-    def _build_message_card(self):
-        card = ttk.Labelframe(self.root, text="  Message ",
-                              style="Card.TLabelframe", padding=8)
-        card.pack(fill="x", padx=8, pady=(0, 4))
-        hdr = tk.Frame(card, bg=CARD)
-        hdr.pack(fill="x")
-        ttk.Label(hdr, text="Optional - pasted before each schedule command",
-                  foreground=MUTED).pack(side="left")
-        self.use_msg_chk = tk.Checkbutton(hdr, text="Use this message",
-                                          variable=self.var_use_text,
-                                          **self._check_kwargs())
-        self.use_msg_chk.pack(side="right")
-        self.message_text = tk.Text(card, height=2, wrap="word", bd=0,
-                                    highlightthickness=0, bg=FIELD, fg=FG,
-                                    insertbackground=FG, font=("Segoe UI", 9))
-        self.message_text.pack(fill="both", expand=True, pady=(4, 0))
+        row3 = self._row(card)
+        row3.addWidget(QtWidgets.QLabel("Grid", card))
+        self.spin_ox = self._make_spin(card, 0, 9999, 4)
+        self.spin_oy = self._make_spin(card, 0, 9999, 4)
+        self.spin_cw = self._make_spin(card, 1, 999, 3)
+        self.spin_ch = self._make_spin(card, 1, 999, 3)
+        for label, widget in (("O", self.spin_ox), ("Y", self.spin_oy),
+                              ("W", self.spin_cw), ("H", self.spin_ch)):
+            row3.addWidget(self._sep(card, label))
+            row3.addWidget(widget)
+        self.btn_calibrate = QtWidgets.QPushButton("Calibrate by click…", card)
+        self.btn_calibrate.clicked.connect(self.start_calibrate)
+        row3.addWidget(self.btn_calibrate)
+        row3.addStretch(1)
+        box.addLayout(row3)
 
-    def _build_log_area(self):
-        card = ttk.Labelframe(self.root, text="  Log ",
-                              style="Card.TLabelframe", padding=8)
-        card.pack(fill="both", expand=True, padx=8, pady=(0, 4))
-        self.log_text = tk.Text(card, height=4, wrap="word", bd=0,
-                                highlightthickness=0, bg=LOG_BG, fg=LOG_FG,
-                                insertbackground=FG, font=("Consolas", 8),
-                                state="disabled")
-        scroll = tk.Scrollbar(card, command=self.log_text.yview,
-                              troughcolor=FIELD, bg=CARD,
-                              activebackground=BORDER, bd=0, width=10)
-        self.log_text.configure(yscrollcommand=scroll.set)
-        self.log_text.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        parent.addWidget(card)
 
-    def _build_action_bar(self):
-        bar = tk.Frame(self.root, bg=BG)
-        bar.pack(fill="x", padx=8, pady=(0, 2))
-        self.btn_start = tk.Button(bar, text="▶  Start Scheduling",
-                                   command=self.start, bg=GREEN, fg="white",
-                                   activebackground="#258742",
-                                   activeforeground="white", relief="flat",
-                                   bd=0, padx=14, pady=4, cursor="hand2",
-                                   disabledforeground="#6f8b76",
-                                   font=("Segoe UI", 10, "bold"))
-        self.btn_start.pack(side="left")
-        self.btn_stop = tk.Button(bar, text="■  Stop", command=self.stop,
-                                  state="disabled", bg=RED, fg="white",
-                                  activebackground="#b32c2c",
-                                  activeforeground="white", relief="flat",
-                                  bd=0, padx=12, pady=4, cursor="hand2",
-                                  disabledforeground="#8b6f6f",
-                                  font=("Segoe UI", 10, "bold"))
-        self.btn_stop.pack(side="left", padx=(8, 14))
-        self.progress = ttk.Progressbar(bar, style="green.Horizontal.TProgressbar",
-                                        maximum=1, value=0)
-        self.progress.pack(side="left", fill="x", expand=True)
+    def _build_message_card(self, parent):
+        card = QtWidgets.QGroupBox("  Message  ", self)
+        box = QtWidgets.QVBoxLayout(card)
+        box.setSpacing(6)
 
-        foot = tk.Frame(self.root, bg=BG)
-        foot.pack(fill="x", padx=8, pady=(0, 8))
-        self.var_scheduled = tk.IntVar(value=0)
-        self.scheduled_label = ttk.Label(foot, text="Scheduled: 0 / 0",
-                                         style="Outer.TLabel")
-        self.scheduled_label.pack(side="left")
-        self.status_label = ttk.Label(foot, text="", style="Outer.TLabel",
-                                      anchor="e")
-        self.status_label.pack(side="right", fill="x", expand=True)
+        hdr = self._row(card)
+        hdr.addWidget(self._sep(card, "Optional - pasted before each schedule command"))
+        hdr.addStretch(1)
+        self.check_use_text = QtWidgets.QCheckBox("Use this message", card)
+        self.check_use_text.setChecked(True)
+        hdr.addWidget(self.check_use_text)
+        box.addLayout(hdr)
+
+        self.message_edit = QtWidgets.QPlainTextEdit(card)
+        self.message_edit.setFixedHeight(50)
+        box.addWidget(self.message_edit)
+
+        parent.addWidget(card)
+
+    def _build_log_area(self, parent):
+        card = QtWidgets.QGroupBox("  Log  ", self)
+        box = QtWidgets.QVBoxLayout(card)
+        box.setSpacing(0)
+        self.log_view = QtWidgets.QPlainTextEdit(card)
+        self.log_view.setObjectName("Log")
+        self.log_view.setReadOnly(True)
+        self.log_view.setMinimumHeight(90)
+        box.addWidget(self.log_view)
+        parent.addWidget(card, 1)
+
+    def _build_action_bar(self, parent):
+        bar = self._row(self)
+        self.btn_start = QtWidgets.QPushButton("▶  Start Scheduling", self)
+        self.btn_start.setObjectName("Start")
+        self.btn_start.clicked.connect(self.start)
+        self.btn_stop = QtWidgets.QPushButton("■  Stop", self)
+        self.btn_stop.setObjectName("Stop")
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self.stop)
+        self.progress = QtWidgets.QProgressBar(self)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        bar.addWidget(self.btn_start)
+        bar.addWidget(self.btn_stop)
+        bar.addWidget(self.progress, 1)
+        parent.addLayout(bar)
+
+        foot = self._row(self)
+        self.scheduled_label = QtWidgets.QLabel("Scheduled: 0 / 0", self)
+        self.scheduled_label.setObjectName("Outer")
+        self.status_label = QtWidgets.QLabel("", self)
+        self.status_label.setObjectName("Outer")
+        self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        foot.addWidget(self.scheduled_label)
+        foot.addStretch(1)
+        foot.addWidget(self.status_label)
+        parent.addLayout(foot)
+
+    def _connect_signals(self):
+        """Wire widget changes and cross-thread callbacks."""
+        for var in (self.spin_total, self.spin_interval, self.spin_day,
+                    self.spin_month, self.spin_year, self.spin_hour,
+                    self.spin_minute):
+            var.valueChanged.connect(self._update_preview)
+
+        self.click_requested.connect(self._draw_click_marker)
+        self.scheduled_updated.connect(self._set_scheduled_counter)
+        self.reset_requested.connect(self.reset_buttons)
+        self.stop_requested.connect(self.stop)
+        self.calibration_clicked.connect(self._apply_calib_click)
 
     # --- Live schedule preview ---
     def _update_preview(self, *_):
         """Show first/last message times computed from the GUI inputs."""
         try:
-            start = datetime(self.var_year.get(), self.var_month.get(),
-                             self.var_day.get(), self.var_hour.get(),
-                             self.var_minute.get())
-            total = self.var_total.get()
-            interval = self.var_interval.get()
-        except (ValueError, tk.TclError):
-            self.preview_label.configure(text="⚠  Invalid start date/time",
-                                         foreground="#ff6b6b")
+            start = datetime(self.spin_year.value(), self.spin_month.value(),
+                             self.spin_day.value(), self.spin_hour.value(),
+                             self.spin_minute.value())
+            total = self.spin_total.value()
+            interval = self.spin_interval.value()
+        except ValueError:
+            self.preview_label.setStyleSheet("color: #ff6b6b;")
+            self.preview_label.setText("⚠  Invalid start date/time")
             return
         # Matches schedule_messages exactly: the calendar advances one day per
         # message while the clock advances by the interval (wrapping at
@@ -463,26 +585,28 @@ class SchedulerGUI:
                 f"   ({total} × {interval} min)")
         if start < datetime.now():
             text = f"⚠  Start is in the past - Telegram will reject it  ·  {text}"
-            self.preview_label.configure(text=text, foreground="#f2a33c")
+            self.preview_label.setStyleSheet("color: #f2a33c;")
         else:
-            self.preview_label.configure(text=text, foreground=MUTED)
+            self.preview_label.setStyleSheet(f"color: {MUTED};")
+        self.preview_label.setText(text)
 
     # --- Logging via a thread-safe queue ---
     def log(self, msg):
         self.log_queue.put(msg)
 
     def poll_log_queue(self):
+        scrolled = False
         try:
             while True:
                 msg = self.log_queue.get_nowait()
-                self.log_text.configure(state="normal")
-                self.log_text.insert("end", f"{msg}\n")
-                self.log_text.see("end")
-                self.log_text.configure(state="disabled")
+                self.log_view.appendPlainText(msg)
                 self._set_status(msg)
+                scrolled = True
         except queue.Empty:
             pass
-        self.root.after(100, self.poll_log_queue)
+        if scrolled:
+            scrollbar = self.log_view.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
 
     def _set_status(self, msg):
         """Mirror the latest log line next to the counter, colored by kind."""
@@ -493,10 +617,15 @@ class SchedulerGUI:
             fg = "#f2a33c"
         elif msg.startswith("Scheduled ") or msg == "Finished.":
             fg = "#4fd07a"
-        try:
-            self.status_label.configure(text=msg[-90:], fg=fg)
-        except tk.TclError:
-            pass
+        self.status_label.setStyleSheet(f"color: {fg};")
+        self.status_label.setText(msg[-90:])
+
+    # --- Mode radios ---
+    def _mode(self):
+        return "auto" if self.radio_auto.isChecked() else "manual"
+
+    def _set_mode(self, mode):
+        (self.radio_manual if mode == "manual" else self.radio_auto).setChecked(True)
 
     # --- Persistent JSON settings ---
     def _load_settings(self):
@@ -508,50 +637,50 @@ class SchedulerGUI:
         if not isinstance(data, dict):
             data = {}
 
-        self.var_total.set(data.get("total", 62))
-        self.var_interval.set(data.get("interval", 3))
-        self.var_typing_interval.set(data.get("typing_interval", 0.12))
-        self.var_year.set(data.get("year", 2026))
-        self.var_month.set(data.get("month", 7))
-        self.var_day.set(data.get("day", 13))
-        self.var_hour.set(data.get("hour", 22))
-        self.var_minute.set(data.get("minute", 15))
-        self.var_mode.set(data.get("mode", "auto"))
-        self.var_countdown.set(data.get("countdown", 1))
-        self.var_use_text.set(data.get("use_text", True))
-        self.var_ox.set(data.get("grid_ox", 771))
-        self.var_oy.set(data.get("grid_oy", 454))
-        self.var_cw.set(data.get("grid_cw", 63))
-        self.var_ch.set(data.get("grid_ch", 50))
-        self.message_text.delete("1.0", "end")
-        self.message_text.insert("1.0", data.get("message", ""))
+        self.spin_total.setValue(int(data.get("total", 62)))
+        self.spin_interval.setValue(int(data.get("interval", 3)))
+        self.spin_typing.setValue(float(data.get("typing_interval", 0.12)))
+        self.spin_year.setValue(int(data.get("year", 2026)))
+        self.spin_month.setValue(int(data.get("month", 7)))
+        self.spin_day.setValue(int(data.get("day", 13)))
+        self.spin_hour.setValue(int(data.get("hour", 22)))
+        self.spin_minute.setValue(int(data.get("minute", 15)))
+        self._set_mode(str(data.get("mode", "auto")))
+        self.spin_countdown.setValue(float(data.get("countdown", 1)))
+        self.check_use_text.setChecked(bool(data.get("use_text", True)))
+        self.spin_ox.setValue(int(data.get("grid_ox", 771)))
+        self.spin_oy.setValue(int(data.get("grid_oy", 454)))
+        self.spin_cw.setValue(int(data.get("grid_cw", 63)))
+        self.spin_ch.setValue(int(data.get("grid_ch", 50)))
+        self.message_edit.setPlainText(str(data.get("message", "")))
 
         geom = data.get("geometry")
-        if geom:
+        if isinstance(geom, str) and geom:
             try:
-                self.root.geometry(geom)
-            except tk.TclError:
+                self.restoreGeometry(
+                    QtCore.QByteArray.fromBase64(geom.encode("ascii")))
+            except Exception:
                 pass
 
     def _save_settings(self):
         data = {
-            "total": self.var_total.get(),
-            "interval": self.var_interval.get(),
-            "typing_interval": self.var_typing_interval.get(),
-            "year": self.var_year.get(),
-            "month": self.var_month.get(),
-            "day": self.var_day.get(),
-            "hour": self.var_hour.get(),
-            "minute": self.var_minute.get(),
-            "mode": self.var_mode.get(),
-            "countdown": self.var_countdown.get(),
-            "use_text": self.var_use_text.get(),
-            "message": self.message_text.get("1.0", "end").strip(),
-            "grid_ox": self.var_ox.get(),
-            "grid_oy": self.var_oy.get(),
-            "grid_cw": self.var_cw.get(),
-            "grid_ch": self.var_ch.get(),
-            "geometry": self.root.geometry(),
+            "total": self.spin_total.value(),
+            "interval": self.spin_interval.value(),
+            "typing_interval": self.spin_typing.value(),
+            "year": self.spin_year.value(),
+            "month": self.spin_month.value(),
+            "day": self.spin_day.value(),
+            "hour": self.spin_hour.value(),
+            "minute": self.spin_minute.value(),
+            "mode": self._mode(),
+            "countdown": self.spin_countdown.value(),
+            "use_text": self.check_use_text.isChecked(),
+            "message": self.message_edit.toPlainText().strip(),
+            "grid_ox": self.spin_ox.value(),
+            "grid_oy": self.spin_oy.value(),
+            "grid_cw": self.spin_cw.value(),
+            "grid_ch": self.spin_ch.value(),
+            "geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
         }
         try:
             with open(SETTINGS_PATH, "w", encoding="utf-8") as fh:
@@ -559,11 +688,18 @@ class SchedulerGUI:
         except OSError as exc:
             self.log(f"Could not save settings: {exc}")
 
-    def on_close(self):
-        if self._click_marker is not None and self._click_marker.winfo_exists():
-            self._click_marker.destroy()
+    def closeEvent(self, event):  # noqa: N802 (Qt naming)
+        self._close_calibration_overlay()
+        self._stop_mouse_listener()
+        self._hide_click_marker()
         self._save_settings()
-        self.root.destroy()
+        if self.kb_listener is not None:
+            try:
+                self.kb_listener.stop()
+            except Exception:
+                pass
+        self._poll_timer.stop()
+        super().closeEvent(event)
 
     # --- Calibrate-by-click ---
     def start_calibrate(self):
@@ -574,14 +710,15 @@ class SchedulerGUI:
         try:
             from pynput import mouse
         except ImportError:
-            messagebox.showinfo("Missing dependency",
-                                "pip install pynput  (needed for click-to-calibrate)")
+            QtWidgets.QMessageBox.information(
+                self, "Missing dependency",
+                "pip install pynput  (needed for click-to-calibrate)")
             return
 
         self.calib_clicks = []
         self._create_calibration_overlay()
-        self.btn_start.configure(state="disabled")
-        self.btn_stop.configure(state="disabled")
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(False)
         self.log("CALIBRATE: click the TOP-LEFT calendar cell (Sun, week 1).")
         self.log("Then the cell to its RIGHT, then the cell BELOW it. 3 clicks total.")
         self._mouse_listener = mouse.Listener(
@@ -593,47 +730,54 @@ class SchedulerGUI:
 
     def _create_calibration_overlay(self):
         """Create a transparent, always-on-top overlay showing calibration points."""
-        overlay = tk.Toplevel(self.root)
-        overlay.title("Calibration guide")
-        overlay.overrideredirect(True)
-        overlay.attributes("-topmost", True)
-        overlay.attributes("-alpha", 0.88)
-        overlay.geometry("320x86+20+20")
-        frame = tk.Frame(overlay, bg="#202124", padx=8, pady=6)
-        frame.pack(fill="both", expand=True)
-        self.calibration_label = tk.Label(
-            frame, text="Calibration started", fg="white", bg="#202124",
-            justify="left", anchor="w", font=("Segoe UI", 10),
+        overlay = QtWidgets.QWidget(
+            None,
+            Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+            | Qt.WindowDoesNotAcceptFocus,
         )
-        self.calibration_label.pack(fill="both", expand=True)
+        overlay.setAttribute(Qt.WA_ShowWithoutActivating)
+        overlay.setWindowOpacity(0.88)
+        overlay.setStyleSheet("QWidget { background: #202124; }")
+        overlay.resize(320, 86)
+        overlay.move(20, 20)
+        layout = QtWidgets.QVBoxLayout(overlay)
+        layout.setContentsMargins(8, 6, 8, 6)
+        label = QtWidgets.QLabel("Calibration started", overlay)
+        label.setStyleSheet("color: white; font-size: 10pt;")
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        overlay.show()
+        self._calibration_label = label
         self._calibration_overlay = overlay
 
     def _update_calibration_overlay(self, text):
         overlay = self._calibration_overlay
-        if overlay is not None and overlay.winfo_exists():
-            self.calibration_label.configure(text=text)
-            overlay.update_idletasks()
+        if overlay is not None:
+            self._calibration_label.setText(text)
 
     def _close_calibration_overlay(self):
         overlay = self._calibration_overlay
         self._calibration_overlay = None
-        if overlay is not None and overlay.winfo_exists():
-            overlay.destroy()
+        self._calibration_label = None
+        if overlay is not None:
+            overlay.close()
+            overlay.deleteLater()
 
     def _on_click(self, x, y, button, pressed):
         if pressed:
             self.calib_clicks.append((x, y))
-            self.root.after(0, self._apply_calib_click)
+            self.calibration_clicked.emit()  # marshal onto the GUI thread
         return True  # keep listening until explicitly stopped
 
     def _apply_calib_click(self):
         n = len(self.calib_clicks)
         if n == 1:
             x, y = self.calib_clicks[0]
-            self.var_ox.set(x)
-            self.var_oy.set(y)
+            self.spin_ox.setValue(x)
+            self.spin_oy.setValue(y)
             self._update_calibration_overlay(
-                f"Captured 1/3: origin ({x}, {y})\\n"
+                f"Captured 1/3: origin ({x}, {y})\n"
                 "Next: click the cell directly RIGHT of it."
             )
             self.log("  Click 1 -> origin set. Now click the cell to its RIGHT (same row).")
@@ -641,12 +785,12 @@ class SchedulerGUI:
             w = abs(self.calib_clicks[1][0] - self.calib_clicks[0][0])
             if w == 0:
                 self.calib_clicks.pop()
-                self._update_calibration_overlay("Same X detected.\\nClick a different cell to the RIGHT.")
+                self._update_calibration_overlay("Same X detected.\nClick a different cell to the RIGHT.")
                 self.log("  Same X as first - click a DIFFERENT cell to the right.")
                 return
-            self.var_cw.set(w)
+            self.spin_cw.setValue(w)
             self._update_calibration_overlay(
-                f"Captured 2/3: cell width {w}px\\n"
+                f"Captured 2/3: cell width {w}px\n"
                 "Next: click the cell directly BELOW origin."
             )
             self.log(f"  Click 2 -> cell width {w}. Now click the cell BELOW (same column).")
@@ -654,76 +798,65 @@ class SchedulerGUI:
             h = abs(self.calib_clicks[2][1] - self.calib_clicks[0][1])
             if h == 0:
                 self.calib_clicks.pop()
-                self._update_calibration_overlay("Same Y detected.\\nClick a different cell BELOW.")
+                self._update_calibration_overlay("Same Y detected.\nClick a different cell BELOW.")
                 self.log("  Same Y as first - click a DIFFERENT cell below.")
                 return
-            self.var_ch.set(h)
+            self.spin_ch.setValue(h)
             self._update_calibration_overlay(
-                f"Captured 3/3: cell height {h}px\\nCalibration complete."
+                f"Captured 3/3: cell height {h}px\nCalibration complete."
             )
             self.log(f"  Click 3 -> cell height {h}. Calibration complete.")
             self._stop_calibrate()
 
-    def _stop_calibrate(self):
+    def _stop_mouse_listener(self):
         listener = self._mouse_listener
         self._mouse_listener = None
-        self._close_calibration_overlay()
         if listener is not None:
             try:
                 listener.stop()
             except Exception:
                 pass
-        # Marshal all widget updates onto Tk's GUI thread.
-        self.root.after(0, self._finish_calibration)
+
+    def _stop_calibrate(self):
+        self._stop_mouse_listener()
+        self._close_calibration_overlay()
+        self._finish_calibration()
 
     def _finish_calibration(self):
-        self.btn_start.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
         self._save_settings()
         self.log("Grid calibrated. Ready to Start.")
 
     # --- Run click marker ---
     def _update_scheduled_counter(self, scheduled, total):
-        self.root.after(0, lambda: self._set_scheduled_counter(scheduled, total))
+        """Called from the worker thread; hops onto the GUI thread."""
+        self.scheduled_updated.emit(scheduled, total)
 
     def _set_scheduled_counter(self, scheduled, total):
-        self.var_scheduled.set(scheduled)
-        self.scheduled_label.configure(text=f"Scheduled: {scheduled} / {total}")
-        try:
-            self.progress.configure(maximum=max(total, 1), value=scheduled)
-        except tk.TclError:
-            pass
+        self.scheduled_label.setText(f"Scheduled: {scheduled} / {total}")
+        self.progress.setMaximum(max(total, 1))
+        self.progress.setValue(scheduled)
 
     def _show_click_marker(self, x, y):
+        """Called from the worker thread; hops onto the GUI thread."""
+        self.click_requested.emit(int(x), int(y))
+
+    def _draw_click_marker(self, x, y):
         """Show a short-lived red dot at the exact automated click location."""
-        def update_marker():
-            if self._click_marker is not None and self._click_marker.winfo_exists():
-                self._click_marker.destroy()
-            marker = tk.Toplevel(self.root)
-            marker.overrideredirect(True)
-            marker.attributes("-topmost", True)
-            marker.attributes("-alpha", 0.9)
-            # The marker is visual only; it must never become the click target.
-            # Make the overlay click-through on Windows where supported.
-            try:
-                marker.attributes("-transparentcolor", "red")
-            except tk.TclError:
-                pass
-            size = 18
-            marker.geometry(f"{size}x{size}+{int(x - size / 2)}+{int(y - size / 2)}")
-            canvas = tk.Canvas(marker, width=size, height=size, bg="red",
-                               highlightthickness=0)
-            canvas.create_oval(1, 1, size - 1, size - 1, fill="red", outline="white", width=2)
-            canvas.pack()
-            self._click_marker = marker
-            marker.after(650, lambda: self._hide_click_marker(marker))
+        self._hide_click_marker()
+        # The marker is visual only; it must never become the click target
+        # (see WindowTransparentForInput in _ClickMarker).
+        marker = _ClickMarker(x, y)
+        marker.show()
+        self._click_marker = marker
+        QtCore.QTimer.singleShot(650, lambda: self._hide_click_marker(marker))
 
-        self.root.after(0, update_marker)
-
-    def _hide_click_marker(self, marker):
-        if marker.winfo_exists():
-            marker.destroy()
-        if self._click_marker is marker:
+    def _hide_click_marker(self, marker=None):
+        current = self._click_marker
+        if current is not None and (marker is None or marker is current):
+            current.close()
+            current.deleteLater()
             self._click_marker = None
 
     # --- Start / Stop ---
@@ -732,42 +865,42 @@ class SchedulerGUI:
             self.log("A previous run is still stopping. Please wait a moment.")
             return
         try:
-            base_time = datetime(self.var_year.get(), self.var_month.get(), self.var_day.get(),
-                                 self.var_hour.get(), self.var_minute.get())
-            total = self.var_total.get()
-            interval = self.var_interval.get()
+            base_time = datetime(self.spin_year.value(), self.spin_month.value(),
+                                 self.spin_day.value(), self.spin_hour.value(),
+                                 self.spin_minute.value())
+            total = self.spin_total.value()
+            interval = self.spin_interval.value()
         except ValueError as exc:
-            messagebox.showerror("Invalid date/time", str(exc))
+            QtWidgets.QMessageBox.critical(self, "Invalid date/time", str(exc))
             return
 
         # If a message was typed in the box, push it to the clipboard so the
         # loop's Ctrl+V pastes it. Leave it empty to reuse the current clipboard.
-        if self.var_use_text.get():
-            text = self.message_text.get("1.0", "end").strip()
+        if self.check_use_text.isChecked():
+            text = self.message_edit.toPlainText().strip()
             if text:
-                self.root.clipboard_clear()
-                self.root.clipboard_append(text)
+                QtWidgets.QApplication.clipboard().setText(text)
                 self.log("Copied message text to clipboard.")
             else:
                 self.log("Message box empty - using current clipboard contents.")
         else:
             self.log("Using current clipboard contents as the message.")
 
-        auto = (self.var_mode.get() == "auto")
-        cal = (self.var_ox.get(), self.var_oy.get(),
-               self.var_cw.get(), self.var_ch.get())
+        auto = self.radio_auto.isChecked()
+        cal = (self.spin_ox.value(), self.spin_oy.value(),
+               self.spin_cw.value(), self.spin_ch.value())
+        # Snapshot widget values on the GUI thread; the worker must not touch
+        # Qt widgets.
+        typing = self.spin_typing.value()
+        countdown = self.spin_countdown.value()
 
         self.stop_event.clear()
-        self.var_scheduled.set(0)
-        self.scheduled_label.configure(text=f"Scheduled: 0 / {self.var_total.get()}")
-        try:
-            self.progress.configure(maximum=max(total, 1), value=0)
-        except tk.TclError:
-            pass
-        self.btn_start.configure(state="disabled")
-        self.btn_stop.configure(state="normal")
+        self.scheduled_label.setText(f"Scheduled: 0 / {total}")
+        self.progress.setMaximum(max(total, 1))
+        self.progress.setValue(0)
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
 
-        countdown = self.var_countdown.get()
         self.log(f"Starting in {countdown}s. Switch to Telegram Desktop now!")
 
         def _run():
@@ -780,8 +913,8 @@ class SchedulerGUI:
                         return
                     time.sleep(0.02)
                 schedule_messages(base_time, total, interval, auto, *cal,
-                                  self.var_typing_interval.get(),
-                                  self.stop_event, self.log, self._show_click_marker,
+                                  typing, self.stop_event, self.log,
+                                  self._show_click_marker,
                                   self._update_scheduled_counter)
                 self.log("Finished.")
             except _SchedulingStop:
@@ -791,7 +924,7 @@ class SchedulerGUI:
             finally:
                 # Always re-enable the buttons, even if the run crashed (e.g.
                 # pyautogui failsafe, automation error, etc.).
-                self.root.after(0, self.reset_buttons)
+                self.reset_requested.emit()
 
         self.worker = threading.Thread(target=_run, daemon=True)
         self.worker.start()
@@ -807,12 +940,12 @@ class SchedulerGUI:
         self.stop_event.set()
         # Restore the controls immediately; the worker will finish its current
         # PyAutoGUI call and then exit at its next interruptible checkpoint.
-        self.btn_start.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
 
     def reset_buttons(self):
-        self.btn_start.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
         self.worker = None
 
     def _start_stop_hotkey(self):
@@ -829,7 +962,8 @@ class SchedulerGUI:
         def on_press(key):
             try:
                 if key == keyboard.Key.f9:
-                    self.stop()
+                    # The listener thread must not touch widgets directly.
+                    self.stop_requested.emit()
             except Exception:
                 pass
 
@@ -843,11 +977,12 @@ class SchedulerGUI:
 
 
 def main():
-    root = tk.Tk()
+    app = QtWidgets.QApplication(sys.argv)
     log_queue = queue.Queue()
-    SchedulerGUI(root, log_queue)
-    root.mainloop()
+    window = SchedulerGUI(log_queue)
+    window.show()
+    return app.exec()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
