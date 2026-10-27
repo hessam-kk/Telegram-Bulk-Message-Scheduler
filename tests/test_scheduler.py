@@ -328,9 +328,9 @@ class TestSettingsSnapshot(unittest.TestCase):
         expected = {
             # Snapshot of the current settings. If you intentionally change
             # settings in the GUI, update these to the new values.
-            "total": 93, "interval": 3, "typing_interval": 0.07,
-            "year": 2026, "month": 9, "day": 7,
-            "hour": 3, "minute": 25, "mode": "auto", "countdown": 0.25,
+            "total": 58, "interval": 3, "typing_interval": 0.07,
+            "year": 2026, "month": 12, "day": 9,
+            "hour": 8, "minute": 4, "mode": "auto", "countdown": 0.25,
             "use_text": True,
             "grid_ox": 770, "grid_oy": 453, "grid_cw": 62, "grid_ch": 51,
         }
@@ -343,17 +343,40 @@ class TestSettingsSnapshot(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 class TestGuiSmoke(unittest.TestCase):
+    """Drives the real Qt widgets; the window is never shown and never closed."""
+
+    _app = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from PySide6 import QtWidgets
+        except Exception as exc:  # headless box -> skip GUI checks
+            raise unittest.SkipTest(f"PySide6 unavailable: {exc}")
+        cls._app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
     def setUp(self):
         try:
-            import tkinter as tk
-            self.root = tk.Tk()
-        except Exception as exc:  # headless box -> skip GUI checks
-            self.skipTest(f"Tk unavailable: {exc}")
-        self.root.withdraw()
-        self.gui = main.SchedulerGUI(self.root, queue.Queue())
+            self.gui = main.SchedulerGUI(queue.Queue())
+        except Exception as exc:  # no display -> skip GUI checks
+            self.skipTest(f"Qt GUI unavailable: {exc}")
+        self.gui.hide()
 
     def tearDown(self):
-        self.root.destroy()
+        # Detach without closing: closeEvent would write settings.json, which
+        # the suite asserts is left untouched.
+        gui = getattr(self, "gui", None)
+        if gui is None:
+            return
+        if gui.kb_listener is not None:
+            try:
+                gui.kb_listener.stop()
+            except Exception:
+                pass
+        gui._poll_timer.stop()
+        gui.deleteLater()
+        if self._app is not None:
+            self._app.processEvents()
 
     def _settings(self):
         with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
@@ -361,51 +384,51 @@ class TestGuiSmoke(unittest.TestCase):
 
     def test_gui_loads_current_settings(self):
         data = self._settings()
-        self.assertEqual(self.gui.var_total.get(), data["total"])
-        self.assertEqual(self.gui.var_interval.get(), data["interval"])
-        self.assertAlmostEqual(self.gui.var_typing_interval.get(),
+        self.assertEqual(self.gui.spin_total.value(), data["total"])
+        self.assertEqual(self.gui.spin_interval.value(), data["interval"])
+        self.assertAlmostEqual(self.gui.spin_typing.value(),
                                data["typing_interval"])
-        self.assertEqual(self.gui.var_year.get(), data["year"])
-        self.assertEqual(self.gui.var_month.get(), data["month"])
-        self.assertEqual(self.gui.var_day.get(), data["day"])
-        self.assertEqual(self.gui.var_hour.get(), data["hour"])
-        self.assertEqual(self.gui.var_minute.get(), data["minute"])
-        self.assertEqual(self.gui.var_mode.get(), data["mode"])
-        self.assertEqual(self.gui.var_ox.get(), data["grid_ox"])
-        self.assertEqual(self.gui.var_oy.get(), data["grid_oy"])
-        self.assertEqual(self.gui.var_cw.get(), data["grid_cw"])
-        self.assertEqual(self.gui.var_ch.get(), data["grid_ch"])
+        self.assertEqual(self.gui.spin_year.value(), data["year"])
+        self.assertEqual(self.gui.spin_month.value(), data["month"])
+        self.assertEqual(self.gui.spin_day.value(), data["day"])
+        self.assertEqual(self.gui.spin_hour.value(), data["hour"])
+        self.assertEqual(self.gui.spin_minute.value(), data["minute"])
+        self.assertEqual(self.gui._mode(), data["mode"])
+        self.assertEqual(self.gui.spin_ox.value(), data["grid_ox"])
+        self.assertEqual(self.gui.spin_oy.value(), data["grid_oy"])
+        self.assertEqual(self.gui.spin_cw.value(), data["grid_cw"])
+        self.assertEqual(self.gui.spin_ch.value(), data["grid_ch"])
 
     def test_countdown_accepts_half_seconds(self):
-        self.gui.var_countdown.set(0.5)
-        self.assertEqual(self.gui.var_countdown.get(), 0.5)
+        self.gui.spin_countdown.setValue(0.5)
+        self.assertEqual(self.gui.spin_countdown.value(), 0.5)
 
     def test_typing_interval_accepts_fine_steps(self):
-        self.gui.var_typing_interval.set(0.05)
-        self.assertEqual(self.gui.var_typing_interval.get(), 0.05)
+        self.gui.spin_typing.setValue(0.05)
+        self.assertEqual(self.gui.spin_typing.value(), 0.05)
 
     def test_scheduled_counter_updates(self):
         self.gui._set_scheduled_counter(5, 94)
-        self.assertEqual(self.gui.var_scheduled.get(), 5)
-        self.assertEqual(self.gui.scheduled_label.cget("text"),
-                         "Scheduled: 5 / 94")
-        self.assertEqual(self.gui.progress["value"], 5)
-        self.assertEqual(self.gui.progress["maximum"], 94)
+        self.assertEqual(self.gui.scheduled_label.text(), "Scheduled: 5 / 94")
+        self.assertEqual(self.gui.progress.value(), 5)
+        self.assertEqual(self.gui.progress.maximum(), 94)
 
     def test_live_preview_matches_current_plan(self):
-        # settings.json: Sep 7 2026 03:25, 93 messages, every 3 min.
-        # One calendar day per message + interval on the clock: last = Dec 8.
-        text = self.gui.preview_label.cget("text")
-        self.assertIn("First Sep 07, 03:25", text)
-        self.assertIn("Last Dec 08, 08:01", text)
-        self.assertIn("(93 × 3 min)", text)
+        # settings.json: Dec 9 2026 08:04, 58 messages, every 3 min.
+        # One calendar day per message + interval on the clock: last = Feb 4.
+        text = self.gui.preview_label.text()
+        self.assertIn("First Dec 09, 08:04", text)
+        self.assertIn("Last Feb 04, 10:55", text)
+        self.assertIn("(58 × 3 min)", text)
 
     def test_live_preview_rejects_impossible_dates(self):
-        self.gui.var_month.set(13)
-        self.assertIn("Invalid", self.gui.preview_label.cget("text"))
-        self.gui.var_month.set(2)
-        self.gui.var_day.set(31)
-        self.assertIn("Invalid", self.gui.preview_label.cget("text"))
+        # The spin boxes clamp each field to its own range, so reach an
+        # impossible date via a valid-looking day in a short month.
+        self.gui.spin_month.setValue(2)
+        self.gui.spin_day.setValue(31)
+        self.assertIn("Invalid", self.gui.preview_label.text())
+        self.gui.spin_month.setValue(4)
+        self.assertIn("Invalid", self.gui.preview_label.text())
 
 
 if __name__ == "__main__":
