@@ -20,8 +20,12 @@ This script automates the tedious process of scheduling messages. It is particul
 
 ### 1. Install Dependencies
 ```bash
-pip install pyautogui
+pip install pyautogui PySide6 pynput
 ```
+* **PySide6** – the Qt desktop UI.
+* **pynput** *(optional)* – enables the global **F9** emergency stop and the
+  "Calibrate by click…" grid capture. Without it, the mouse-corner failsafe
+  still works.
 
 ### 2. Configuration
 Open `main.py` and adjust the following variables:
