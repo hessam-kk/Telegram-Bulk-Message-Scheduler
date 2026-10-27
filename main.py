@@ -126,6 +126,19 @@ QPlainTextEdit#Log {{
     font-size: 8pt;
 }}
 QCheckBox, QRadioButton {{ background: transparent; color: {FG}; spacing: 6px; }}
+/* Explicit indicators: the native checked dot is invisible on this dark card. */
+QCheckBox::indicator, QRadioButton::indicator {{
+    width: 12px;
+    height: 12px;
+    border: 2px solid {MUTED};
+    background: transparent;
+}}
+QRadioButton::indicator {{ border-radius: 8px; }}
+QCheckBox::indicator {{ border-radius: 3px; }}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
+    border-color: {ACCENT};
+    background: {ACCENT};
+}}
 QPushButton {{
     background: {FIELD};
     color: {FG};
@@ -290,8 +303,29 @@ def schedule_messages(base_time, total_messages, interval_minutes, auto_click,
         nap(0.15)  # Brief pause before the next loop starts
 
 
+def _screen_ratio():
+    """Device pixel ratio of the app's screen (1.0 when there is no screen)."""
+    app = QtWidgets.QApplication.instance()
+    screen = app.primaryScreen() if app is not None else None
+    if screen is None:
+        return 1.0
+    return screen.devicePixelRatio() or 1.0
+
+
+def _physical_to_logical(x, y, ratio=None):
+    """Convert pyautogui screen pixels to Qt's device-independent pixels.
+
+    pyautogui (and therefore the calibrated calendar grid) measures in physical
+    pixels, while Qt positions widgets in logical ones. On a scaled display the
+    two differ by the device pixel ratio, which is what dragged the click ring
+    down and to the right of the cell that was actually clicked.
+    """
+    ratio = _screen_ratio() if ratio is None else ratio
+    return x / ratio, y / ratio
+
+
 class _ClickMarker(QtWidgets.QWidget):
-    """Short-lived, click-through red dot drawn at the automated click spot."""
+    """Short-lived, click-through ring drawn at the automated click spot."""
 
     SIZE = 18
 
@@ -304,12 +338,17 @@ class _ClickMarker(QtWidgets.QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.resize(self.SIZE, self.SIZE)
-        self.move(int(x - self.SIZE / 2), int(y - self.SIZE / 2))
+        # (x, y) arrive in physical screen pixels; Qt moves windows in logical
+        # pixels, so undo the display scaling first.
+        logical_x, logical_y = _physical_to_logical(x, y)
+        self.move(round(logical_x - self.SIZE / 2),
+                  round(logical_y - self.SIZE / 2))
 
     def paintEvent(self, event):  # noqa: N802 (Qt naming)
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        painter.setBrush(QtGui.QColor("red"))
+        # Hollow ring: no fill, so the date cell underneath stays readable.
+        painter.setBrush(Qt.NoBrush)
         painter.setPen(QtGui.QPen(QtGui.QColor("white"), 2))
         inset = 2
         painter.drawEllipse(inset, inset, self.SIZE - 2 * inset, self.SIZE - 2 * inset)
