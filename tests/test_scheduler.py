@@ -19,6 +19,7 @@ import inspect
 import json
 import os
 import queue
+import tempfile
 import threading
 import unittest
 from datetime import datetime
@@ -187,6 +188,30 @@ class TestMonthsBetween(unittest.TestCase):
                                              datetime(2026, 9, 1)), 12)
 
 
+class TestClickMarkerPlacement(unittest.TestCase):
+    """The click ring must be placed in Qt's logical pixels, not raw
+
+    pyautogui pixels, or it drifts down/right by the display scale factor.
+    """
+
+    def test_scaled_display_is_converted(self):
+        # 125%-scaled 1920x1080 screen: 770,453 physical -> 616,362.4 logical.
+        lx, ly = main._physical_to_logical(770, 453, ratio=1.25)
+        self.assertAlmostEqual(lx, 616.0)
+        self.assertAlmostEqual(ly, 362.4)
+
+    def test_unscaled_display_is_an_identity(self):
+        self.assertEqual(main._physical_to_logical(770, 453, ratio=1.0),
+                         (770.0, 453.0))
+
+    def test_falls_back_to_the_real_screen_ratio(self):
+        ratio = main._screen_ratio()
+        self.assertGreater(ratio, 0)
+        lx, ly = main._physical_to_logical(100, 100)
+        self.assertAlmostEqual(lx, 100 / ratio)
+        self.assertAlmostEqual(ly, 100 / ratio)
+
+
 # --------------------------------------------------------------------------
 # schedule_messages end-to-end (side effects stubbed)
 # --------------------------------------------------------------------------
@@ -320,27 +345,59 @@ class TestModuleState(unittest.TestCase):
 
 
 class TestSettingsSnapshot(unittest.TestCase):
-    """settings.json is read-only here; the values below are the current ones."""
+    """settings.json is read-only here and only checked for shape.
 
-    def test_settings_json_parses_and_matches_current_state(self):
+    The values are deliberately not pinned: the app rewrites this file every
+    time a setting changes, so a hard-coded snapshot fails on any normal run.
+    The exact round-trip is covered by TestGuiSmoke against a pinned fixture.
+    """
+
+    TYPES = {
+        "total": int, "interval": int, "typing_interval": (int, float),
+        "year": int, "month": int, "day": int, "hour": int, "minute": int,
+        "mode": str, "countdown": (int, float), "use_text": bool,
+        "grid_ox": int, "grid_oy": int, "grid_cw": int, "grid_ch": int,
+    }
+
+    def _data(self):
         with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        expected = {
-            # Snapshot of the current settings. If you intentionally change
-            # settings in the GUI, update these to the new values.
-            "total": 58, "interval": 3, "typing_interval": 0.07,
-            "year": 2026, "month": 12, "day": 9,
-            "hour": 8, "minute": 4, "mode": "auto", "countdown": 0.25,
-            "use_text": True,
-            "grid_ox": 770, "grid_oy": 453, "grid_cw": 62, "grid_ch": 51,
-        }
-        for key, value in expected.items():
-            self.assertEqual(data.get(key), value, key)
+            return json.load(fh)
+
+    def test_settings_json_has_the_expected_keys_and_types(self):
+        data = self._data()
+        self.assertIsInstance(data, dict)
+        for key, kind in self.TYPES.items():
+            self.assertIn(key, data, key)
+            self.assertIsInstance(data[key], kind, key)
+
+    def test_settings_values_are_in_sane_ranges(self):
+        data = self._data()
+        self.assertGreaterEqual(data["total"], 1)
+        self.assertGreaterEqual(data["interval"], 1)
+        self.assertIn(data["mode"], ("auto", "manual"))
+        self.assertTrue(1 <= data["month"] <= 12)
+        self.assertTrue(1 <= data["day"] <= 31)
+        self.assertTrue(0 <= data["hour"] <= 23)
+        self.assertTrue(0 <= data["minute"] <= 59)
+        self.assertGreater(data["grid_cw"], 0)
+        self.assertGreater(data["grid_ch"], 0)
 
 
 # --------------------------------------------------------------------------
 # GUI smoke test (no window shown, nothing saved)
 # --------------------------------------------------------------------------
+
+# Pinned settings for the GUI tests. The live settings.json is rewritten by the
+# app whenever a setting changes, so the GUI must be exercised against a fixture
+# rather than whatever the last run happened to save.
+PINNED_SETTINGS = {
+    "total": 93, "interval": 3, "typing_interval": 0.07,
+    "year": 2026, "month": 9, "day": 7,
+    "hour": 3, "minute": 25, "mode": "auto", "countdown": 0.25,
+    "use_text": True, "message": "",
+    "grid_ox": 770, "grid_oy": 453, "grid_cw": 62, "grid_ch": 51,
+}
+
 
 class TestGuiSmoke(unittest.TestCase):
     """Drives the real Qt widgets; the window is never shown and never closed."""
@@ -356,6 +413,16 @@ class TestGuiSmoke(unittest.TestCase):
         cls._app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
     def setUp(self):
+        # Point the GUI at a throwaway settings file: the real one changes under
+        # us, and the suite's state guard requires it to stay untouched.
+        self._settings_dir = tempfile.TemporaryDirectory()
+        self.settings_path = os.path.join(self._settings_dir.name, "settings.json")
+        with open(self.settings_path, "w", encoding="utf-8") as fh:
+            json.dump(PINNED_SETTINGS, fh)
+        patcher = mock.patch.object(main, "SETTINGS_PATH", self.settings_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._settings_dir.cleanup)
         try:
             self.gui = main.SchedulerGUI(queue.Queue())
         except Exception as exc:  # no display -> skip GUI checks
@@ -379,7 +446,7 @@ class TestGuiSmoke(unittest.TestCase):
             self._app.processEvents()
 
     def _settings(self):
-        with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
+        with open(self.settings_path, "r", encoding="utf-8") as fh:
             return json.load(fh)
 
     def test_gui_loads_current_settings(self):
@@ -414,12 +481,23 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertEqual(self.gui.progress.maximum(), 94)
 
     def test_live_preview_matches_current_plan(self):
-        # settings.json: Dec 9 2026 08:04, 58 messages, every 3 min.
-        # One calendar day per message + interval on the clock: last = Feb 4.
+        # Pinned plan: Sep 7 2026 03:25, 93 messages, every 3 min.
+        # One calendar day per message + interval on the clock: last = Dec 8.
         text = self.gui.preview_label.text()
-        self.assertIn("First Dec 09, 08:04", text)
-        self.assertIn("Last Feb 04, 10:55", text)
-        self.assertIn("(58 × 3 min)", text)
+        self.assertIn("First Sep 07, 03:25", text)
+        self.assertIn("Last Dec 08, 08:01", text)
+        self.assertIn("(93 × 3 min)", text)
+
+    def test_save_settings_round_trips(self):
+        self.gui.spin_total.setValue(17)
+        self.gui.spin_day.setValue(4)
+        self.gui._set_mode("manual")
+        self.gui._save_settings()
+        written = self._settings()
+        self.assertEqual(written["total"], 17)
+        self.assertEqual(written["day"], 4)
+        self.assertEqual(written["mode"], "manual")
+        self.assertTrue(written["geometry"])
 
     def test_live_preview_rejects_impossible_dates(self):
         # The spin boxes clamp each field to its own range, so reach an
